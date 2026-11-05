@@ -1,0 +1,15 @@
+.dev/
+build/
+*.xcframework
+*.aar
+node_modules/
+.gradle/
+.build/
+sdk/node/bin/
+.swiftpm/
+sdk/apple/NSH/NativeShell.xcframework
+examples/*/.nsh/
+
+# The Node example host keeps its key and paired phones here
+host-state.json
+dist/

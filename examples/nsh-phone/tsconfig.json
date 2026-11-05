@@ -1,0 +1,12 @@
+{
+  "extends": "./.nsh/tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "../../sdk/js/client.ts",
+    "../../sdk/js/nsh.ts"
+  ]
+}

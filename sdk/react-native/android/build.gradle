@@ -1,0 +1,23 @@
+// The React Native module: forwards call(name, args) to TailPocketBridge.
+// The app's repositories must reach io.jingtao.tailpocket (build/android/m2 from
+// scripts/build-mobile.sh android and ./gradlew publish in sdk/android, until it is on Maven Central).
+apply plugin: "com.android.library"
+apply plugin: "org.jetbrains.kotlin.android"
+
+def safeExtGet(prop, fallback) { rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback }
+
+android {
+    namespace "io.jingtao.tailpocket.reactnative"
+    compileSdkVersion safeExtGet("compileSdkVersion", 35)
+    defaultConfig { minSdkVersion safeExtGet("minSdkVersion", 26) }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation "com.facebook.react:react-android"
+    implementation "io.jingtao.tailpocket:tailpocket-ui:0.2.0"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2"
+}

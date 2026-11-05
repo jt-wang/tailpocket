@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What it does</title>
+<!-- A looping picture of what tailpocket does: a computer shows a QR code, a phone
+     scans it once, and from then on the phone app reaches the computer's app from anywhere; or, on
+     the same Wi-Fi, the phone picks the computer and both screens show the same 6-digit code.
+     Everything is drawn from one function of time (render(t)), so ?t=<ms> shows one exact moment:
+     scripts/render-illustrations.sh uses that to make the README's GIFs. ?theme=light|dark forces a
+     theme. With reduced motion it shows one still moment. The names and the QR pattern are made up;
+     the pattern cannot be scanned. -->
+<style>
+:root {
+  --bg: #F3F3F3; --ink: #171717; --muted: #595959; --card: #EBEBEB; --edge: #DDDDDD;
+  --btn: #171717; --on-btn: #F3F3F3; --ok: #1A7F37; --line: #B6B6B6;
+  --win: #FFFFFF; --win-bar: #E8E8E8; --phone-bg: #FFFFFF; --row: #F0F0F0; --sheet: #FFFFFF; --cap: #171717;
+  --sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #171717; --ink: #F3F3F3; --muted: #B3B3B3; --card: #1F1F1F; --edge: #2E2E2E;
+    --btn: #F3F3F3; --on-btn: #171717; --ok: #3FB950; --line: #555555;
+    --win: #232323; --win-bar: #2C2C2C; --phone-bg: #0F0F0F; --row: #1C1C1C; --sheet: #303030; --cap: #2C2C2C;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #171717; --ink: #F3F3F3; --muted: #B3B3B3; --card: #1F1F1F; --edge: #2E2E2E;
+  --btn: #F3F3F3; --on-btn: #171717; --ok: #3FB950; --line: #555555;
+  --win: #232323; --win-bar: #2C2C2C; --phone-bg: #0F0F0F; --row: #1C1C1C; --sheet: #303030; --cap: #2C2C2C;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+body { display: grid; place-items: center; min-height: 100vh; overflow: hidden; }
+.fit { width: 100vw; aspect-ratio: 16 / 9; max-height: 100vh; position: relative; }
+.stage { position: absolute; left: 0; top: 0; width: 1200px; height: 675px; transform-origin: 0 0; }
+
+/* The computer */
+.laptop { position: absolute; left: 70px; top: 92px; width: 560px; }
+.lid { height: 352px; border-radius: 18px 18px 6px 6px; background: #0E0E0E; padding: 14px; }
+.display { position: relative; height: 100%; border-radius: 4px 4px 0 0; background: var(--card); overflow: hidden; }
+.base { height: 16px; margin: 0 -34px; border-radius: 0 0 14px 14px; background: linear-gradient(#cdcdcd, #b6b6b6); }
+:root[data-theme="dark"] .base { background: linear-gradient(#3a3a3a, #2a2a2a); }
+:root[data-theme="dark"] .lid, :root[data-theme="dark"] .phone { background: #2A2A2A; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .base { background: linear-gradient(#3a3a3a, #2a2a2a); } :root:not([data-theme="light"]) .lid, :root:not([data-theme="light"]) .phone { background: #2A2A2A; } }
+.win { position: absolute; left: 18px; top: 16px; right: 18px; bottom: 16px; border-radius: 10px; background: var(--win); box-shadow: 0 0 0 0.5px var(--edge); overflow: hidden; }
+.win-bar { height: 30px; display: flex; align-items: center; gap: 7px; padding: 0 12px; background: var(--win-bar); font-size: 15px; color: var(--muted); }
+.win-bar i { width: 11px; height: 11px; border-radius: 50%; background: var(--line); display: block; }
+.win-bar b { margin-left: 10px; font-weight: 600; color: var(--ink); }
+.log { padding: 14px 16px; font-family: var(--mono); font-size: 15px; line-height: 1.75; color: var(--muted); }
+.log div { opacity: 0; }
+.log .from-phone { color: var(--ink); }
+.sheet { position: absolute; left: 50%; top: 52px; width: 270px; margin-left: -135px; padding: 18px 18px 16px; border-radius: 14px; background: var(--sheet); box-shadow: 0 0 0 0.5px var(--edge), 0 8px 24px -8px rgba(0,0,0,.25); text-align: center; opacity: 0; }
+.sheet h4 { margin: 0 0 12px; font-size: 17px; }
+.sheet p { margin: 10px 0 0; font-size: 15px; color: var(--muted); display: grid; }
+.sheet p span { grid-area: 1 / 1; }
+.sheet .code { font-size: 34px; font-variant-numeric: tabular-nums; letter-spacing: .04em; margin: 6px 0 4px; }
+.sheet .btns { display: flex; gap: 8px; justify-content: center; margin-top: 12px; }
+.sheet .btns span { font-size: 15px; padding: 7px 16px; border-radius: 999px; border: 0.5px solid var(--line); }
+.sheet .btns .yes { background: var(--btn); color: var(--on-btn); border-color: transparent; }
+.ok { color: var(--ok); font-weight: 600; }
+.qr { display: block; margin: 0 auto; padding: 8px; border-radius: 8px; background: #fff; box-sizing: content-box; }
+.qr rect { fill: #111; }
+
+/* The phone */
+.phone { position: absolute; left: 860px; top: 34px; width: 286px; padding: 9px; border-radius: 48px; background: #0E0E0E; }
+.screen { position: relative; height: 588px; border-radius: 39px; background: var(--phone-bg); overflow: hidden; }
+.status { position: absolute; top: 0; left: 0; right: 0; height: 46px; display: flex; align-items: center; justify-content: space-between; padding: 6px 26px 0 30px; font-size: 15px; font-weight: 600; z-index: 3; }
+.island { position: absolute; left: 50%; top: 10px; width: 86px; height: 26px; margin-left: -43px; border-radius: 14px; background: #000; }
+.net { font-size: 15px; font-weight: 600; display: grid; justify-items: end; }
+.net span { grid-area: 1 / 1; }
+.view { position: absolute; inset: 0; padding: 62px 20px 20px; opacity: 0; }
+.camera { background: #0B0B0B; color: #F3F3F3; padding: 0; }
+.camera .finder { position: absolute; left: 50%; top: 190px; width: 180px; height: 180px; margin-left: -90px; border-radius: 22px; }
+.camera .finder::before { content: ""; position: absolute; inset: -3px; border-radius: 25px; border: 3px solid rgba(255,255,255,.9); }
+.camera .scanline { position: absolute; left: 10px; right: 10px; height: 2px; background: #F3F3F3; top: 0; }
+.camera .shown { position: absolute; left: 50%; top: 200px; margin-left: -80px; width: 160px; height: 160px; background: #fff; border-radius: 12px; padding: 10px; }
+.camera .shown rect { fill: #111; }
+.camera .hint { position: absolute; left: 0; right: 0; top: 400px; text-align: center; font-size: 17px; color: rgba(255,255,255,.85); }
+.done { position: absolute; left: 24px; right: 24px; top: 236px; padding: 18px; border-radius: 18px; background: #fff; color: #171717; text-align: center; opacity: 0; }
+.done b { display: block; font-size: 17px; margin-top: 6px; }
+.app h3 { margin: 8px 0 2px; font-size: 22px; letter-spacing: -0.02em; }
+.app .sub { display: flex; align-items: center; gap: 6px; font-size: 15px; color: var(--muted); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); display: inline-block; }
+.feed { margin-top: 18px; display: flex; flex-direction: column; gap: 8px; }
+.msg { padding: 10px 12px; border-radius: 12px; background: var(--row); font-size: 17px; opacity: 0; }
+.deploy { position: absolute; left: 20px; right: 20px; bottom: 20px; padding: 13px; border-radius: 19px; background: var(--btn); color: var(--on-btn); text-align: center; font-size: 17px; font-weight: 600; }
+.pairv h3 { margin: 14px 0 18px; font-size: 22px; letter-spacing: -0.02em; line-height: 1.2; }
+.pairv .label { font-size: 15px; color: var(--muted); margin-bottom: 8px; }
+.pairv .row { padding: 13px 14px; border-radius: 12px; border: 0.5px solid var(--line); font-size: 17px; display: flex; align-items: center; justify-content: space-between; }
+.pairv .row svg { color: var(--muted); }
+.pairv .scan { margin-top: 12px; padding: 13px; border-radius: 12px; background: var(--btn); color: var(--on-btn); text-align: center; font-size: 17px; font-weight: 600; }
+.pairv .check { margin-top: 26px; text-align: center; opacity: 0; }
+.pairv .check .code { font-size: 34px; font-variant-numeric: tabular-nums; letter-spacing: .04em; margin-top: 6px; }
+
+/* Between them */
+.path { position: absolute; left: 0; top: 0; overflow: visible; }
+.path .track { fill: none; stroke: var(--line); stroke-width: 2; stroke-dasharray: 4 7; }
+.path .packet { fill: var(--ink); }
+.place { position: absolute; left: 636px; top: 268px; width: 224px; text-align: center; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; opacity: 0; }
+.caption { position: absolute; left: 70px; top: 516px; width: 680px; min-height: 92px; padding: 18px 22px; border-radius: 18px; background: var(--cap); color: #F3F3F3; font-size: 22px; line-height: 1.38; letter-spacing: -0.01em; }
+.caption span { position: absolute; left: 22px; right: 22px; top: 18px; opacity: 0; }
+.toggle { position: absolute; right: 14px; bottom: 14px; width: 34px; height: 34px; border-radius: 50%; border: 0.5px solid var(--line); background: var(--bg); color: var(--ink); display: grid; place-items: center; cursor: pointer; }
+.capture .toggle { display: none; }
+.caption span, h3, h4, .sheet p span, .done b, .hint { text-wrap: balance; }
+</style>
+</head>
+<body>
+<div class="fit"><div class="stage" role="img" aria-label="A computer shows a QR code; a phone scans it once; from then on the phone app reaches the computer's app at home, on 5G and on hotel Wi-Fi. On the same Wi-Fi the phone can pick the computer instead, and both screens show the same 6-digit code.">
+  <svg class="path" width="1200" height="675" aria-hidden="true">
+    <path class="track" id="track" d="M 632 250 C 700 250, 780 250, 858 250"/>
+    <circle class="packet" r="5" id="p1"/><circle class="packet" r="5" id="p2"/>
+  </svg>
+
+  <div class="laptop" aria-hidden="true">
+    <div class="lid"><div class="display">
+      <div class="win">
+        <div class="win-bar"><i></i><i></i><i></i><b>Build server</b></div>
+        <div class="log" id="log">
+          <div>$ npm run build</div>
+          <div>✓ 214 tests passed</div>
+          <div class="from-phone">→ deploy (from My iPhone)</div>
+          <div>✓ preview deployed</div>
+          <div>✓ nightly build passed</div>
+        </div>
+      </div>
+      <div class="sheet" id="sheet-qr">
+        <h4>Add a phone</h4>
+        <svg class="qr" id="qr-big" width="134" height="134" viewBox="0 0 29 29"></svg>
+        <p><span id="note-scan">Scan with the phone app. Expires in 2 minutes.</span><span class="ok" id="note-paired">✓ Paired: My iPhone</span></p>
+      </div>
+      <div class="sheet" id="sheet-code">
+        <h4>Pair with My iPhone?</h4>
+        <p style="margin:0">Check that the phone shows</p>
+        <div class="code">418 207</div>
+        <div class="btns"><span>Don’t allow</span><span class="yes" id="allow">Allow</span></div>
+      </div>
+    </div></div>
+    <div class="base"></div>
+  </div>
+
+  <div class="place" id="place-0">Home Wi-Fi</div>
+  <div class="place" id="place-1">5G, on the train</div>
+  <div class="place" id="place-2">Hotel Wi-Fi</div>
+
+  <div class="phone" aria-hidden="true"><div class="screen">
+    <div class="status"><span>9:41</span><span class="net"><span id="net-wifi">Wi-Fi</span><span id="net-5g">5G</span></span></div>
+    <div class="island"></div>
+    <div class="view camera" id="v-camera">
+      <div class="shown" id="shown"><svg id="qr-small" width="140" height="140" viewBox="0 0 29 29"></svg></div>
+      <div class="finder" id="finder"><div class="scanline" id="scanline"></div></div>
+      <div class="hint" id="hint">Point at the computer’s code</div>
+      <div class="done" id="done">✓<b>Paired with Studio Mac</b></div>
+    </div>
+    <div class="view app" id="v-app">
+      <h3>Studio Mac</h3>
+      <div class="sub"><span class="dot"></span><span>Connected</span></div>
+      <div class="feed">
+        <div class="msg" id="m1">214 tests passed</div>
+        <div class="msg" id="m2">Preview deployed</div>
+        <div class="msg" id="m3">Nightly build passed</div>
+      </div>
+      <div class="deploy" id="deploy">Deploy preview</div>
+    </div>
+    <div class="view pairv" id="v-pair">
+      <h3>Pair with your computer</h3>
+      <div class="label">On this Wi-Fi</div>
+      <div class="row" id="row"><span>Studio Mac</span><svg width="7" height="12" viewBox="0 0 7 12" aria-hidden="true"><path d="M1 1l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div class="scan">Scan QR code</div>
+      <div class="check" id="check"><div class="label">Check that the computer shows</div><div class="code">418 207</div></div>
+      <div class="done" id="done2" style="background:var(--row);color:var(--ink)">✓<b>Paired with Studio Mac</b></div>
+    </div>
+  </div></div>
+
+  <div class="caption" aria-hidden="true">
+    <span id="c1">Your computer shows a QR code. Your phone scans it once.</span>
+    <span id="c2">From then on, your phone app talks to your app on the computer, both ways.</span>
+    <span id="c3">No server to run, no port forwarding, no VPN app.</span>
+    <span id="c4">On the same Wi-Fi, the phone can pick the computer instead. Both screens show the same code.</span>
+  </div>
+  <button class="toggle" id="toggle" type="button" aria-label="Pause animation"><svg width="12" height="12" viewBox="0 0 16 16"><rect x="3" y="2" width="3.5" height="12" rx="1" fill="currentColor"/><rect x="9.5" y="2" width="3.5" height="12" rx="1" fill="currentColor"/></svg></button>
+</div></div>
+
+<script>
+(function () {
+  var DURATION = 19000;
+  var q = new URLSearchParams(location.search);
+  if (q.get("theme")) document.documentElement.setAttribute("data-theme", q.get("theme"));
+  var $ = function (id) { return document.getElementById(id); };
+
+  // A QR-looking pattern: finder squares and fixed pseudo-random modules. Not a real code.
+  function pattern(svg) {
+    var n = 29, out = "", seed = 7;
+    function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
+    function finder(x, y) { out += '<rect x="' + x + '" y="' + y + '" width="7" height="7"/><rect x="' + (x + 1) + '" y="' + (y + 1) + '" width="5" height="5" style="fill:var(--qbg,#fff)"/><rect x="' + (x + 2) + '" y="' + (y + 2) + '" width="3" height="3"/>'; }
+    for (var y = 0; y < n; y++) for (var x = 0; x < n; x++) {
+      var inFinder = (x < 8 && y < 8) || (x > n - 9 && y < 8) || (x < 8 && y > n - 9);
+      if (!inFinder && rnd() < 0.47) out += '<rect x="' + x + '" y="' + y + '" width="1.02" height="1.02"/>';
+    }
+    finder(0, 0); finder(n - 7, 0); finder(0, n - 7);
+    svg.innerHTML = out;
+  }
+  pattern($("qr-big")); pattern($("qr-small"));
+
+  // Progress of t through [a, b], eased.
+  function p(t, a, b) { var x = Math.min(1, Math.max(0, (t - a) / (b - a))); return x * x * (3 - 2 * x); }
+  // Visible from a to b with a short fade at both ends.
+  function vis(t, a, b, f) { f = f || 300; return Math.min(p(t, a, a + f), 1 - p(t, b - f, b)); }
+  function show(el, o, dy) { el.style.opacity = o.toFixed(3); el.style.transform = dy ? "translateY(" + ((1 - o) * dy).toFixed(1) + "px)" : ""; }
+
+  var track = $("track"), len = track.getTotalLength();
+  // Packets along the path: [start ms, toward the phone?]. Each takes 700 ms.
+  var PACKETS = [[5200, true], [6900, false], [8800, true], [11400, true], [16000, true]];
+  function packets(t) {
+    var dots = [$("p1"), $("p2")], i = 0;
+    PACKETS.forEach(function (e) {
+      if (t < e[0] || t > e[0] + 700 || i >= dots.length) return;
+      var k = p(t, e[0], e[0] + 700), pt = track.getPointAtLength((e[1] ? k : 1 - k) * len);
+      dots[i].setAttribute("cx", pt.x); dots[i].setAttribute("cy", pt.y); dots[i++].style.opacity = 1;
+    });
+    for (; i < dots.length; i++) dots[i].style.opacity = 0;
+  }
+  var logs = $("log").children;
+  // When each place is on screen.
+  var places = [[8200, 9900], [9900, 11600], [11600, 13400]];
+
+  function render(t) {
+    // 1. QR pairing
+    show($("sheet-qr"), vis(t, 300, 3900), 10);
+    show($("note-scan"), 1 - p(t, 2500, 2700)); show($("note-paired"), p(t, 2700, 2900));
+    var camera = Math.max(1 - p(t, 4000, 4300), p(t, 18500, 18800));
+    show($("v-camera"), camera);
+    $("scanline").style.top = (8 + 162 * (0.5 - 0.5 * Math.cos((t - 1000) / 420))).toFixed(1) + "px";
+    $("scanline").style.opacity = vis(t, 1000, 2600, 200).toFixed(3);
+    // The code fades back first, then the toast comes in.
+    $("shown").style.opacity = $("finder").style.opacity = $("hint").style.opacity = (1 - 0.85 * (t < 4300 ? p(t, 2400, 2600) : 0)).toFixed(3);
+    show($("done"), t < 4300 ? p(t, 2600, 2850) : 0, 8);
+
+    // 2. Connected, both ways; 3. from anywhere
+    show($("v-app"), vis(t, 4300, 13700));
+    var connected = t > 4500 && t < 13600;
+    track.style.opacity = connected ? p(t, 4500, 4900) * (1 - p(t, 13300, 13600)) : (t > 15700 ? p(t, 15700, 16100) * (1 - p(t, 18600, 19000)) : 0);
+    show(logs[0], vis(t, 4400, 13600, 200));
+    show(logs[1], vis(t, 5000, 13600, 200));
+    packets(t);
+    show($("m1"), vis(t, 5900, 13700, 250), 6);
+    var press = vis(t, 6700, 7000, 150);
+    $("deploy").style.transform = "scale(" + (1 - 0.04 * press).toFixed(3) + ")";
+    show(logs[2], vis(t, 7600, 13600, 200));
+    show(logs[3], vis(t, 8600, 13600, 200));
+    show($("m2"), vis(t, 9500, 13700, 250), 6);
+    show(logs[4], vis(t, 11200, 13600, 200));
+    show($("m3"), vis(t, 12100, 13700, 250), 6);
+    places.forEach(function (pl, i) { show($("place-" + i), vis(t, pl[0], pl[1], 250), 8); });
+    // Wi-Fi fades out before 5G fades in, and back.
+    show($("net-5g"), vis(t, 10050, 11450, 150)); show($("net-wifi"), 1 - vis(t, 9900, 11600, 150));
+    // Light status-bar text over the camera, faded in and out with it.
+    document.querySelector(".status").style.color = "color-mix(in srgb, #F3F3F3 " + (100 * camera).toFixed(1) + "%, var(--ink))";
+
+    // 4. Same Wi-Fi: pick the computer, check the code
+    show($("v-pair"), vis(t, 13700, 18800));
+    $("row").style.background = "color-mix(in srgb, var(--row) " + (100 * vis(t, 14300, 14700, 150)).toFixed(1) + "%, transparent)";
+    show($("check"), vis(t, 14600, 16200, 250), 6);
+    show($("sheet-code"), vis(t, 14700, 16300), 10);
+    $("allow").style.transform = "scale(" + (1 - 0.06 * vis(t, 15400, 15700, 120)).toFixed(3) + ")";
+    show($("done2"), vis(t, 16100, 18800), 8);
+    $("done2").style.top = "330px";
+
+    // Captions
+    show($("c1"), vis(t, 0, 4200, 250), 6);
+    show($("c2"), vis(t, 4200, 8200, 250), 6);
+    show($("c3"), vis(t, 8200, 13600, 250), 6);
+    show($("c4"), vis(t, 13600, 19000, 250), 6);
+  }
+
+  // Scale the 1200×675 stage to the window.
+  var stage = document.querySelector(".stage"), fit = document.querySelector(".fit");
+  function scale() { stage.style.transform = "scale(" + (fit.clientWidth / 1200) + ")"; }
+  addEventListener("resize", scale); scale();
+
+  var fixed = q.get("t");
+  var reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (fixed !== null) { document.body.classList.add("capture"); render(+fixed); return; }
+  if (reduce) { render(7900); $("toggle").style.display = "none"; return; }
+  var playing = true, offset = 0, start = performance.now(), last = 0;
+  function frame(now) { if (playing) { last = (now - start + offset) % DURATION; render(last); } requestAnimationFrame(frame); }
+  $("toggle").addEventListener("click", function () {
+    playing = !playing;
+    if (playing) { start = performance.now(); offset = last; }
+    this.setAttribute("aria-label", playing ? "Pause animation" : "Play animation");
+  });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How to use it</title>
+<!-- A looping picture of the code a developer writes: the computer side (Node) types itself and
+     shows a QR code; the phone side (Swift) scans, pairs, connects and fetches; then the same phone
+     code in Kotlin, React Native and NSH. The code is the real API (sdk/node, sdk/apple, sdk/android,
+     sdk/react-native); writeSecret and viewController stand for the app's own code.
+     render(t) draws one moment, so ?t=<ms> shows it exactly (scripts/render-illustrations.sh makes
+     the README's GIFs from that); ?theme=light|dark forces a theme; reduced motion shows a still. -->
+<style>
+:root {
+  --bg: #F3F3F3; --ink: #171717; --muted: #595959; --card: #EBEBEB; --edge: #DDDDDD;
+  --btn: #171717; --on-btn: #F3F3F3; --ok: #1A7F37; --cap: #171717;
+  --code-bg: #FFFFFF; --kw: #8A3FFC; --str: #1A7F37; --com: #6B6B6B; --fn: #0B5CAD;
+  --sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #171717; --ink: #F3F3F3; --muted: #B3B3B3; --card: #1F1F1F; --edge: #2E2E2E;
+    --btn: #F3F3F3; --on-btn: #171717; --ok: #3FB950; --cap: #2C2C2C;
+    --code-bg: #1C1C1C; --kw: #C4A0FF; --str: #7EE2A0; --com: #858585; --fn: #8CC4FF;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #171717; --ink: #F3F3F3; --muted: #B3B3B3; --card: #1F1F1F; --edge: #2E2E2E;
+  --btn: #F3F3F3; --on-btn: #171717; --ok: #3FB950; --cap: #2C2C2C;
+  --code-bg: #1C1C1C; --kw: #C4A0FF; --str: #7EE2A0; --com: #858585; --fn: #8CC4FF;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+body { display: grid; place-items: center; min-height: 100vh; overflow: hidden; }
+.fit { width: 100vw; aspect-ratio: 16 / 9; max-height: 100vh; position: relative; }
+.stage { position: absolute; left: 0; top: 0; width: 1200px; height: 675px; transform-origin: 0 0; }
+
+.panel { position: absolute; top: 70px; height: 440px; border-radius: 16px; background: var(--code-bg); box-shadow: 0 0 0 0.5px var(--edge); overflow: hidden; }
+.left { left: 40px; width: 540px; }
+.right { left: 600px; width: 560px; }
+.head { height: 50px; display: flex; align-items: center; gap: 8px; padding: 0 18px; font-size: 17px; }
+.head b { font-weight: 700; margin-right: 6px; }
+.head .lang { color: var(--muted); }
+.tab { font-size: 15px; padding: 5px 11px; border-radius: 999px; color: var(--muted); }
+.tab.on { background: var(--btn); color: var(--on-btn); }
+.code { position: relative; padding: 18px 20px; font-family: var(--mono); font-size: 15px; line-height: 1.6; }
+.code .ln { white-space: pre; overflow: hidden; height: 1.6em; }
+.code.swap { position: absolute; left: 0; right: 0; top: 50px; }
+.kw { color: var(--kw); } .str { color: var(--str); } .com { color: var(--com); } .fn { color: var(--fn); }
+.caret { position: absolute; width: 2px; height: 1.2em; background: var(--ink); }
+.result { position: absolute; padding: 10px 14px; border-radius: 12px; background: var(--card); font-size: 15px; opacity: 0; }
+.result .ok { color: var(--ok); font-weight: 700; }
+.result.qr { right: 18px; bottom: 18px; text-align: center; padding: 0; background: none; }
+.result.qr svg { display: block; padding: 6px; background: #fff; }
+.result.qr svg rect { fill: #111; }
+.result.qr small { display: block; margin-top: 6px; color: var(--muted); font-family: var(--mono); font-size: 15px; }
+.result.paired { left: 20px; bottom: 18px; }
+.result.answer { right: 18px; bottom: 18px; font-family: var(--mono); }
+.caption { position: absolute; left: 40px; top: 538px; width: 1120px; height: 66px; padding: 18px 24px; border-radius: 18px; background: var(--cap); color: #F3F3F3; font-size: 22px; line-height: 1.38; letter-spacing: -0.01em; }
+.caption span { text-wrap: balance; position: absolute; left: 24px; right: 24px; top: 18px; opacity: 0; }
+.toggle { position: absolute; right: 14px; bottom: 14px; width: 34px; height: 34px; border-radius: 50%; border: 0.5px solid var(--edge); background: var(--bg); color: var(--ink); display: grid; place-items: center; cursor: pointer; }
+.capture .toggle { display: none; }
+</style>
+</head>
+<body>
+<div class="fit"><div class="stage" role="img" aria-label="The code: on the computer, TailPocketHost.start in front of your server and connectHost.pair shows a QR code; on the phone, scan, pair, save the link, connect, and fetch from the local address; the same calls in Kotlin and React Native.">
+  <div class="panel left" aria-hidden="true">
+    <div class="head"><b>On the computer</b><span class="lang">Node</span></div>
+    <div class="code" id="node"></div>
+    <div class="result qr" id="r-qr"><svg id="qr" width="88" height="88" viewBox="0 0 29 29"></svg><small>pairing.qr</small></div>
+  </div>
+  <div class="panel right" aria-hidden="true">
+    <div class="head"><b>On the phone</b><span class="tab" id="t-swift">Swift</span><span class="tab" id="t-kotlin">Kotlin</span><span class="tab" id="t-rn">React Native</span><span class="tab" id="t-nsh">NSH</span></div>
+    <div class="code swap" id="swift"></div>
+    <div class="code swap" id="kotlin"></div>
+    <div class="code swap" id="rn"></div>
+    <div class="code swap" id="nsh"></div>
+    <div class="result paired" id="r-paired"><span class="ok">✓</span> Paired with Studio Mac</div>
+    <div class="result answer" id="r-answer">"hello from the computer"</div>
+  </div>
+  <div class="caption" aria-hidden="true">
+    <span id="c1">On the computer: put a host in front of your server and show its QR code.</span>
+    <span id="c2">On the phone: scan the code, pair, and keep the link in the Keychain.</span>
+    <span id="c3">Connect, and talk to your server at a local address, from anywhere.</span>
+    <span id="c4">The same calls in Kotlin, React Native and NSH.</span>
+  </div>
+  <button class="toggle" id="toggle" type="button" aria-label="Pause animation"><svg width="12" height="12" viewBox="0 0 16 16"><rect x="3" y="2" width="3.5" height="12" rx="1" fill="currentColor"/><rect x="9.5" y="2" width="3.5" height="12" rx="1" fill="currentColor"/></svg></button>
+</div></div>
+
+<script>
+(function () {
+  var DURATION = 28000;
+  var q = new URLSearchParams(location.search);
+  if (q.get("theme")) document.documentElement.setAttribute("data-theme", q.get("theme"));
+  var $ = function (id) { return document.getElementById(id); };
+
+  var CODE = {
+    node: [
+      "import { TailPocketHost }",
+      "  from 'tailpocket';",
+      "",
+      "const connectHost = await TailPocketHost.start({",
+      "  forward: '127.0.0.1:3000',   // your server",
+      "  save: (state) => writeSecret(state),",
+      "});",
+      "",
+      "const pairing = await connectHost.pair();",
+      "showQR(pairing.qr);",
+    ],
+    swift: [
+      "let store = TailPocketKeychainStore()",
+      "let text = try await TailPocketQRScanner",
+      "    .scan(from: viewController)",
+      "let link = try await TailPocket.pair(",
+      "    try TailPocket.decodeInvite(text),",
+      "    phoneKey: try store.phoneKey(), device: \"My iPhone\")",
+      "try store.saveLink(link)",
+      "",
+      "let url = try TailPocket.connect(link).baseURL",
+      "let (data, _) = try await URLSession.shared",
+      "    .data(from: url.appending(path: \"hello.txt\"))",
+    ],
+    kotlin: [
+      "val store = TailPocketKeystoreStore(context)",
+      "val tailPocket = TailPocket.default",
+      "val text = TailPocketQrScanActivity.scan(activity)",
+      "val link = tailPocket.pair(",
+      "    tailPocket.decodeInvite(text),",
+      "    phoneKey = store.phoneKey(), device = \"My Pixel\")",
+      "store.saveLink(link)",
+      "",
+      "val url = tailPocket.connect(link).baseUrl",
+      "val body = URL(\"$url/hello.txt\").readText()",
+    ],
+    rn: [
+      "import { tailPocket }",
+      "  from 'react-native-tailpocket';",
+      "",
+      "const link = await tailPocket.pair(",
+      "  await tailPocket.scan(),",
+      "  { device: 'My phone', save: true });",
+      "",
+      "const { baseUrl } = await tailPocket.connect();",
+      "const res = await fetch(baseUrl + '/hello.txt');",
+    ],
+    nsh: [
+      "import { tailPocket }",
+      "  from '…/sdk/js/nsh.ts';",
+      "",
+      "const link = await tailPocket.pair(",
+      "  await tailPocket.scan(),",
+      "  { device: 'My phone', save: true });",
+      "",
+      "const { baseUrl } = await tailPocket.connect();",
+      "const res = await fetch(baseUrl + '/hello.txt');",
+      "",
+      "// native app, once: TailPocketNsh.attach(view)",
+    ],
+  };
+  var KW = /^(import|from|const|await|let|val|try|async|true|false)$/;
+  function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;"); }
+  // A small highlighter: comments, strings, keywords, calls.
+  function highlight(line) {
+    return line.replace(/(\/\/.*$)|('[^']*'|"[^"]*")|([A-Za-z_][\w]*)(\s*\()?|([^A-Za-z_'"\/]+|\/)/g, function (m, com, str, word, call, other) {
+      if (com) return '<span class="com">' + esc(com) + "</span>";
+      if (str) return '<span class="str">' + esc(str) + "</span>";
+      if (word) {
+        if (KW.test(word)) return '<span class="kw">' + word + "</span>" + (call || "");
+        if (call) return '<span class="fn">' + word + "</span>" + call;
+        return word;
+      }
+      return esc(other);
+    });
+  }
+  // Each block becomes lines whose visible width (in ch, the font is monospaced) grows while typing.
+  var blocks = {};
+  Object.keys(CODE).forEach(function (k) {
+    var el = $(k);
+    blocks[k] = CODE[k].map(function (text) {
+      var d = document.createElement("div");
+      d.className = "ln";
+      d.innerHTML = highlight(text) || " ";
+      el.appendChild(d);
+      return { el: d, n: text.length };
+    });
+  });
+  var caret = document.createElement("span");
+  caret.className = "caret";
+
+  function p(t, a, b) { var x = Math.min(1, Math.max(0, (t - a) / (b - a))); return x * x * (3 - 2 * x); }
+  function vis(t, a, b, f) { f = f || 300; return Math.min(p(t, a, a + f), 1 - p(t, b - f, b)); }
+  function show(el, o, dy) { el.style.opacity = o.toFixed(3); el.style.transform = dy ? "translateY(" + ((1 - o) * dy).toFixed(1) + "px)" : ""; }
+
+  // Types lines [from, to) of a block starting at time a, at cps characters per ms (0.075 unless
+  // given); returns when it ends. A blank line is a short pause.
+  function typed(t, key, a, from, to, cps) {
+    var lines = blocks[key], at = a, caretAt = null;
+    cps = cps || 0.075;
+    for (var i = from; i < to; i++) {
+      var dur = lines[i].n ? lines[i].n / cps : 160;
+      var k = Math.min(1, Math.max(0, (t - at) / dur));
+      var chars = Math.round(k * lines[i].n);
+      lines[i].el.style.width = (t < at ? 0 : chars) + "ch";
+      lines[i].el.style.maxWidth = (lines[i].n + 1) + "ch";
+      lines[i].el.style.visibility = t < at ? "hidden" : "visible";
+      if (t >= at && t < at + dur) caretAt = { el: lines[i].el, chars: chars };
+      at += dur + 90;
+    }
+    return { end: at, caret: caretAt };
+  }
+
+  // QR-looking pattern (not a real code), as in what-it-is.html.
+  (function () {
+    var n = 29, out = "", seed = 11;
+    function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
+    for (var y = 0; y < n; y++) for (var x = 0; x < n; x++) {
+      var f = (x < 8 && y < 8) || (x > n - 9 && y < 8) || (x < 8 && y > n - 9);
+      if (!f && rnd() < 0.47) out += '<rect x="' + x + '" y="' + y + '" width="1.02" height="1.02"/>';
+    }
+    [[0, 0], [n - 7, 0], [0, n - 7]].forEach(function (c) {
+      out += '<rect x="' + c[0] + '" y="' + c[1] + '" width="7" height="7"/><rect x="' + (c[0] + 1) + '" y="' + (c[1] + 1) + '" width="5" height="5" style="fill:#fff"/><rect x="' + (c[0] + 2) + '" y="' + (c[1] + 2) + '" width="3" height="3"/>';
+    });
+    $("qr").innerHTML = out;
+  })();
+
+  function render(t) {
+    if (caret.parentNode) caret.parentNode.removeChild(caret);
+    var cur = null;
+    // 1. The computer side
+    var a = typed(t, "node", 500, 0, CODE.node.length);
+    $("node").style.opacity = (1 - p(t, DURATION - 400, DURATION)).toFixed(3);
+    cur = a.caret;
+    show($("r-qr"), vis(t, a.end + 100, DURATION - 400), 8);
+    // 2 and 3. The phone side in Swift: scan and pair, then connect and fetch
+    var swiftOn = t < 14600;
+    $("swift").style.opacity = swiftOn ? 1 : 1 - p(t, 14600, 14900);
+    var s1 = typed(t, "swift", 5600, 0, 7);
+    var s2 = typed(t, "swift", 10600, 7, CODE.swift.length);
+    cur = s1.caret || s2.caret || cur;
+    show($("r-paired"), vis(t, s1.end + 100, 14600), 8);
+    show($("r-answer"), vis(t, s2.end + 150, 14600), 8);
+    // 4. The same calls in Kotlin, then React Native, typed faster
+    var k = typed(t, "kotlin", 14900, 0, CODE.kotlin.length, 0.16);
+    var r = typed(t, "rn", 19000, 0, CODE.rn.length, 0.16);
+    if (t >= 14900 && t < 18900) cur = k.caret || cur;
+    var n = typed(t, "nsh", 22900, 0, CODE.nsh.length, 0.16);
+    if (t >= 19000 && t < 22800) cur = r.caret || cur;
+    if (t >= 22900) cur = n.caret || cur;
+    $("kotlin").style.opacity = vis(t, 14700, 18900).toFixed(3);
+    $("rn").style.opacity = vis(t, 18800, 22800).toFixed(3);
+    $("nsh").style.opacity = vis(t, 22700, DURATION - 200).toFixed(3);
+    // Each tab fades on and off with its code.
+    var on = { "t-swift": Math.max(1 - p(t, 14600, 14900), p(t, DURATION - 400, DURATION)), "t-kotlin": p(t, 14600, 14900) * (1 - p(t, 18600, 18900)), "t-rn": p(t, 18600, 18900) * (1 - p(t, 22500, 22800)), "t-nsh": p(t, 22500, 22800) * (1 - p(t, DURATION - 400, DURATION)) };
+    Object.keys(on).forEach(function (id) {
+      var x = (100 * on[id]).toFixed(1) + "%";
+      $(id).style.background = "color-mix(in srgb, var(--btn) " + x + ", transparent)";
+      $(id).style.color = "color-mix(in srgb, var(--on-btn) " + x + ", var(--muted))";
+    });
+    // The caret sits after the last typed character (the code area is monospaced, 20px padding).
+    if (cur) {
+      cur.el.parentNode.appendChild(caret);
+      caret.style.left = "calc(20px + " + cur.chars + "ch)";
+      caret.style.top = (cur.el.offsetTop + 3) + "px";
+    }
+
+    show($("c1"), vis(t, 0, 5400, 250), 6);
+    show($("c2"), vis(t, 5400, 10400, 250), 6);
+    show($("c3"), vis(t, 10400, 14600, 250), 6);
+    show($("c4"), vis(t, 14600, DURATION, 250), 6);
+  }
+
+  var stage = document.querySelector(".stage"), fit = document.querySelector(".fit");
+  function scale() { stage.style.transform = "scale(" + (fit.clientWidth / 1200) + ")"; }
+  addEventListener("resize", scale); scale();
+
+  var fixed = q.get("t");
+  var reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (fixed !== null) { document.body.classList.add("capture"); render(+fixed); return; }
+  if (reduce) { render(14400); $("toggle").style.display = "none"; return; }
+  var playing = true, offset = 0, start = performance.now(), last = 0;
+  function frame(now) { if (playing) { last = (now - start + offset) % DURATION; render(last); } requestAnimationFrame(frame); }
+  $("toggle").addEventListener("click", function () {
+    playing = !playing;
+    if (playing) { start = performance.now(); offset = last; }
+    this.setAttribute("aria-label", playing ? "Pause animation" : "Play animation");
+  });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

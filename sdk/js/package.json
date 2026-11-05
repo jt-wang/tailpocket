@@ -1,0 +1,10 @@
+{
+  "name": "tailpocket-client",
+  "version": "0.2.0",
+  "description": "One TypeScript API over the TailPocket native bridge, for NSH and React Native apps.",
+  "license": "MIT",
+  "type": "module",
+  "exports": { ".": "./client.ts", "./nsh": "./nsh.ts" },
+  "files": ["client.ts", "nsh.ts"],
+  "scripts": { "test": "node --test test/client.test.ts" }
+}

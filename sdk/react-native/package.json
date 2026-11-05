@@ -1,0 +1,24 @@
+{
+  "name": "react-native-tailpocket",
+  "version": "0.2.0",
+  "description": "Pair a React Native app with a computer by QR code or same Wi-Fi, then reach it from anywhere over Tailcat.",
+  "license": "MIT",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "files": [
+    "src",
+    "android",
+    "ios",
+    "TailPocketReactNative.podspec",
+    "!android/build"
+  ],
+  "peerDependencies": {
+    "react-native": ">=0.73"
+  },
+  "scripts": {
+    "test": "mkdir -p node_modules && ln -sfn ../../js node_modules/tailpocket-client && node --test test/transport.test.ts"
+  },
+  "dependencies": {
+    "tailpocket-client": "file:../js"
+  }
+}
