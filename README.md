@@ -151,8 +151,9 @@ Measured with an Apple-silicon Mac as the computer, over Tailcat's default relay
   Chrome tab.
 - Unit tests in every package (`go test ./...`, `swift test`, `./gradlew test`, `npm test` in
   `sdk/node`, `sdk/web`, `sdk/js` and `sdk/react-native`, `nsh test` in `examples/nsh-phone`).
+- A physical Android phone: scanned the QR code and connected over cellular.
 
-Not tested yet: physical iPhones and Android phones, Linux and Windows hosts (the binaries build),
+Not tested yet: physical iPhones, Linux and Windows hosts (the binaries build),
 Android's Bonjour discovery (the emulator cannot see the Mac's Bonjour), pairing links on iOS (the
 simulator asks before opening one, so the iOS test passes the invite as a launch argument), and the
 built-in Go Bonjour responder on macOS (macOS's own `dns-sd` is used there).
