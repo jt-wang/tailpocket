@@ -12,6 +12,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"tailscale.com/types/key"
 
@@ -68,7 +69,8 @@ type Host struct {
 	mu       sync.Mutex
 	id       identity
 	allowed  []key.NodePublic
-	byIP     map[netip.Addr]string
+	byIP     map[netip.Addr]string // phones whose connections serveMain admits
+	conns    map[*Conn]struct{}    // admitted connections not yet closed
 	main     node
 	pairings map[*Pairing]struct{}
 	closed   bool
@@ -79,7 +81,8 @@ func New(cfg Config) (*Host, error) {
 		return nil, errors.New("connecthost: Config.Save is required")
 	}
 	h := &Host{name: connectinvite.CleanName(cfg.Name), port: cfg.Port, pairingPort: cfg.PairingPort, save: cfg.Save,
-		derpMapURL: cfg.DERPMapURL, start: realStart, listener: newChanListener(), pairings: map[*Pairing]struct{}{}}
+		derpMapURL: cfg.DERPMapURL, start: realStart, listener: newChanListener(), pairings: map[*Pairing]struct{}{},
+		conns: map[*Conn]struct{}{}}
 	if h.name == "" {
 		hostname, _ := os.Hostname()
 		h.name = connectinvite.CleanName(hostname)
@@ -153,7 +156,7 @@ func (h *Host) Start(ctx context.Context) error {
 // On failure the previous node keeps running. h.op must be held.
 func (h *Host) restartMain(ctx context.Context, keys []key.NodePublic) error {
 	h.mu.Lock()
-	id, old := h.id, h.main
+	id, old, prev := h.id, h.main, slices.Clone(h.allowed)
 	h.mu.Unlock()
 	var next node
 	if len(keys) > 0 {
@@ -161,12 +164,17 @@ func (h *Host) restartMain(ctx context.Context, keys []key.NodePublic) error {
 		if old != nil {
 			_ = old.Close() // the address is the node key's; two live nodes with it would fight
 		}
+		h.mu.Lock()
+		h.byIP = indexKeys(keys) // the new node may hand over connections before start returns
+		h.mu.Unlock()
 		next, err = h.start(ctx, nodeSpec{key: id.key, psk: id.psk, region: id.region, allowed: keys, port: h.port,
 			onTCP: h.serveMain, derpMapURL: h.derpMapURL})
 		if err != nil {
+			h.mu.Lock()
+			h.byIP = indexKeys(prev)
+			h.mu.Unlock()
 			if old != nil {
 				h.mu.Lock()
-				prev := slices.Clone(h.allowed)
 				h.main = nil
 				h.mu.Unlock()
 				if len(prev) > 0 {
@@ -188,10 +196,12 @@ func (h *Host) restartMain(ctx context.Context, keys []key.NodePublic) error {
 		if next != nil {
 			_ = next.Close()
 		}
+		h.mu.Lock()
+		h.byIP = indexKeys(prev)
+		h.mu.Unlock()
 		if old != nil && len(keys) > 0 {
 			// Bring back what was running before.
 			h.mu.Lock()
-			prev := slices.Clone(h.allowed)
 			h.main = nil
 			h.mu.Unlock()
 			if back, berr := h.start(context.Background(), nodeSpec{key: id.key, psk: id.psk, region: id.region, allowed: prev,
@@ -209,8 +219,10 @@ func (h *Host) restartMain(ctx context.Context, keys []key.NodePublic) error {
 	h.mu.Lock()
 	h.id, h.main, h.allowed = id, next, slices.Clone(keys)
 	h.reindexLocked()
+	dropped := h.takeConnsLocked(removedKeys(prev, keys))
 	closed := h.closed
 	h.mu.Unlock()
+	closeConns(dropped)
 	if closed && next != nil {
 		_ = next.Close()
 		return ErrClosed
@@ -248,16 +260,17 @@ func (h *Host) addPhone(ctx context.Context, k key.NodePublic) (string, error) {
 	if err := h.save(State{Identity: id.String(), Allowed: keyStrings(allowed)}); err != nil {
 		return "", fmt.Errorf("connecthost: saving state: %w", err)
 	}
-	main.Allow(k)
 	h.mu.Lock()
 	h.allowed = allowed
 	h.reindexLocked()
 	h.mu.Unlock()
+	main.Allow(k)
 	return main.Address(), nil
 }
 
-// SetAllowed replaces the paired phones. Removing a phone restarts the main node, which drops
-// open connections from every phone; they reconnect on their next dial.
+// SetAllowed replaces the paired phones. Removing a phone this way restarts the main node, which
+// drops open connections from every phone; they reconnect on their next dial. To remove one phone
+// and keep the others connected, use Revoke.
 func (h *Host) SetAllowed(ctx context.Context, phones []string) error {
 	keys, err := parseKeys(phones)
 	if err != nil {
@@ -274,20 +287,42 @@ func (h *Host) SetAllowed(ctx context.Context, phones []string) error {
 	return h.restartMain(ctx, keys)
 }
 
-// Revoke removes one phone. Unknown keys are ignored.
+// Revoke removes one phone. Unknown keys are ignored. It saves the new state first; then it closes
+// that phone's connections, including any the app has not accepted yet, and the host refuses its new
+// ones. Other phones keep their connections. Removing the last phone stops the main node.
+//
+// Tailcat cannot forget a client, so the removed phone can still reach the main node until it
+// next restarts; the host closes each connection it opens before the app sees it.
 func (h *Host) Revoke(ctx context.Context, phone string) error {
 	k, err := parsePhone(phone)
 	if err != nil {
 		return err
 	}
+	h.op.Lock()
+	defer h.op.Unlock()
 	h.mu.Lock()
 	keep := slices.DeleteFunc(slices.Clone(h.allowed), func(x key.NodePublic) bool { return x == k })
-	unchanged := len(keep) == len(h.allowed)
+	unchanged, closed, id := len(keep) == len(h.allowed), h.closed, h.id
 	h.mu.Unlock()
 	if unchanged {
 		return nil
 	}
-	return h.SetAllowed(ctx, keyStrings(keep))
+	if closed {
+		return ErrClosed
+	}
+	if len(keep) == 0 {
+		return h.restartMain(ctx, nil)
+	}
+	if err := h.save(State{Identity: id.String(), Allowed: keyStrings(keep)}); err != nil {
+		return fmt.Errorf("connecthost: saving state: %w", err)
+	}
+	h.mu.Lock()
+	h.allowed = keep
+	h.reindexLocked()
+	dropped := h.takeConnsLocked(map[string]bool{k.String(): true})
+	h.mu.Unlock()
+	closeConns(dropped)
+	return nil
 }
 
 // Address is the main node's Tailcat address, or "" while no phone is paired.
@@ -342,15 +377,22 @@ func (h *Host) serveMain(port uint16) func(net.Conn) {
 		return nil
 	}
 	return func(c net.Conn) {
-		phone := ""
+		var ip netip.Addr
 		if a, ok := c.RemoteAddr().(*net.TCPAddr); ok {
-			if ip, ok := netip.AddrFromSlice(a.IP); ok {
-				h.mu.Lock()
-				phone = h.byIP[ip.Unmap()]
-				h.mu.Unlock()
-			}
+			ip, _ = netip.AddrFromSlice(a.IP)
 		}
-		h.listener.offer(&Conn{Conn: c, Phone: phone})
+		// Look up and register under one lock, so a Revoke either sees this connection or runs first.
+		h.mu.Lock()
+		phone, ok := h.byIP[ip.Unmap()]
+		if !ok {
+			h.mu.Unlock()
+			_ = c.Close() // not (or no longer) paired: Tailcat may still know the key, connecthost does not
+			return
+		}
+		pc := &Conn{Conn: c, Phone: phone, host: h}
+		h.conns[pc] = struct{}{}
+		h.mu.Unlock()
+		h.listener.offer(pc)
 	}
 }
 
@@ -360,17 +402,63 @@ func (h *Host) reindex() {
 	h.reindexLocked()
 }
 
-func (h *Host) reindexLocked() {
-	h.byIP = make(map[netip.Addr]string, len(h.allowed))
-	for _, k := range h.allowed {
-		h.byIP[clientIP(k)] = k.String()
+func (h *Host) reindexLocked() { h.byIP = indexKeys(h.allowed) }
+
+func indexKeys(keys []key.NodePublic) map[netip.Addr]string {
+	out := make(map[netip.Addr]string, len(keys))
+	for _, k := range keys {
+		out[clientIP(k)] = k.String()
+	}
+	return out
+}
+
+// removedKeys lists the keys in prev but not in next.
+func removedKeys(prev, next []key.NodePublic) map[string]bool {
+	out := map[string]bool{}
+	for _, k := range prev {
+		if !slices.Contains(next, k) {
+			out[k.String()] = true
+		}
+	}
+	return out
+}
+
+// takeConnsLocked unregisters and marks the open connections of phones, for closeConns. h.mu must be held.
+func (h *Host) takeConnsLocked(phones map[string]bool) []*Conn {
+	var out []*Conn
+	for c := range h.conns {
+		if phones[c.Phone] {
+			c.revoked.Store(true)
+			delete(h.conns, c)
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func closeConns(cs []*Conn) {
+	for _, c := range cs {
+		_ = c.Conn.Close()
 	}
 }
 
 // Conn is a connection from a paired phone.
 type Conn struct {
 	net.Conn
-	Phone string // the phone's key ("nodekey:…"), "" if unknown
+	Phone string // the phone's key ("nodekey:…")
+
+	host    *Host
+	revoked atomic.Bool // the phone was removed; the listener skips it
+}
+
+// Close closes the connection.
+func (c *Conn) Close() error {
+	if c.host != nil {
+		c.host.mu.Lock()
+		delete(c.host.conns, c)
+		c.host.mu.Unlock()
+	}
+	return c.Conn.Close()
 }
 
 // PhoneOf returns the key of the phone that opened c, or "".

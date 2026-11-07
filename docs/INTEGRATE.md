@@ -6,12 +6,12 @@ nothing to clone, no Go or gomobile. To build them yourself, see [BUILD.md](BUIL
 
 ## 0. The packages
 
-`R=https://github.com/jt-wang/tailpocket/releases/download/v0.2.2` below.
+`R=https://github.com/jt-wang/tailpocket/releases/download/v0.2.4` below.
 
 | Side | Get it |
 |---|---|
 | Computer, Node | `npm install $R/tailpocket-node.tgz` (the helper for macOS, Linux and Windows is inside) |
-| Computer, Go | `go get github.com/jt-wang/tailpocket@v0.2.2` |
+| Computer, Go | `go get github.com/jt-wang/tailpocket@v0.2.4` |
 | Computer, any language | the helper `$R/tailpocket-host-<os>-<arch>` (`darwin-arm64`, `darwin-amd64`, `linux-amd64`, `linux-arm64`, `windows-amd64.exe`) |
 | Phone, Swift | Swift package `https://github.com/jt-wang/tailpocket`, from `0.2.0` |
 | Phone, Kotlin | unzip `$R/tailpocket-android-m2.zip` into your project and add its `m2` folder as a Maven repository |
@@ -39,7 +39,8 @@ optionally `pairing.local({service, confirm})` for same-Wi-Fi pairing. Show `cod
 
 **Any other language:** spawn `tailpocket-host` and follow [HOST-IPC.md](HOST-IPC.md).
 
-Offer "remove this phone" in your UI: `connectHost.revoke(phone)`.
+Offer "remove this phone" in your UI: `connectHost.revoke(phone)`. It closes that phone's connections
+at once, so send anything the phone should hear (such as "you were removed") before calling it.
 
 Check: run your app, open a pairing window, and pair with the CLI phone:
 `tailpocket-phone-<os>-<arch> pair -key phone.key -out link.json -` with the QR text on stdin, then
@@ -61,7 +62,7 @@ Check: `swift test`; with the computer running, `TAILPOCKET_LIVE=1 swift test --
 
 **Android (Kotlin):** unzip `tailpocket-android-m2.zip` into your project, add
 `maven { url = uri("m2") }` (the path to that folder) and depend on
-`io.jingtao.tailpocket:tailpocket:0.2.0` (and `tailpocket-ui` for the Compose
+`io.jingtao.tailpocket:tailpocket:0.2.4` (and `tailpocket-ui` for the Compose
 scanner and `TailPocketPairingScreen`). The libraries declare INTERNET, ACCESS_NETWORK_STATE and CAMERA.
 Set `android:networkSecurityConfig="@xml/tailpocket_network_security_config"` on your
 `<application>` (or add its `127.0.0.1` domain-config to your own config): Android refuses plain
@@ -70,8 +71,9 @@ HTTP to `TailPocketConnection.baseUrl` otherwise. Use `TailPocketKeystoreStore`.
 
 **Browser / PWA:** depend on `tailpocket-web` and serve it with its `dist/` folder; `loadTailPocket()`, then `decodeInvite`, `pair`, `fetch`.
 Browsers cannot browse Bonjour, so pairing is by QR code or pasted text; all traffic goes through
-the relays. Store the link (it holds the phone key) where your app keeps secrets. Check:
-`TAILPOCKET_LIVE=1 npm test` in `sdk/web`.
+the relays. The link holds the phone key, so store it where your app keeps secrets.
+
+To check the web phone, run `TAILPOCKET_LIVE=1 npm test` in `sdk/web`.
 
 **NSH:** in the native app, `TailPocketNsh.attach(view)` (iOS: copy `sdk/apple/NSH/Sources` into your app next
 to its NativeShell.xcframework, with the Swift package above; Android: copy `sdk/android/tailpocket-nsh` as a module

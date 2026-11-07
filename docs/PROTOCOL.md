@@ -8,9 +8,12 @@ Two Tailcat nodes run on the computer:
 | pairing | 48932 (`Config.PairingPort`) | only the one-time key of one open window |
 
 The main node never starts with an empty allowlist: Tailcat admits every client when its allowlist
-is empty, so the host starts it after the first phone pairs. Tailcat has no call to remove a client,
-so `SetAllowed` and `Revoke` restart the main node with the new list. The node key is part of
-`State.Identity`, so the address stays the same across restarts.
+is empty, so the host starts it after the first phone pairs. Tailcat has no call to remove a client.
+`Revoke` removes one phone while the node keeps running: the host closes that phone's open
+connections and closes each new one it opens, before the app sees it, so other phones stay
+connected. `SetAllowed` restarts the main node with the new list, which drops every phone's
+connections. The node key is part of `State.Identity`, so the address stays the same across
+restarts.
 
 ## Invite
 

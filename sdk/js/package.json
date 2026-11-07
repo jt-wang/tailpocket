@@ -1,6 +1,6 @@
 {
   "name": "tailpocket-client",
-  "version": "0.2.0",
+  "version": "0.2.4",
   "description": "One TypeScript API over the TailPocket native bridge, for NSH and React Native apps.",
   "license": "MIT",
   "type": "module",

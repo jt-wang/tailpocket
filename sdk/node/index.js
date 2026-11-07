@@ -189,7 +189,7 @@ export class TailPocketHost extends EventEmitter {
   /** Replace the paired phones (removing one restarts the node; other phones reconnect). */
   async setAllowed(phones) { await this.#request({ cmd: 'setAllowed', allowed: phones }); }
 
-  /** Remove one phone. */
+  /** Remove one phone: its connections close; other phones stay connected. */
   async revoke(phone) { await this.#request({ cmd: 'revoke', phone }); }
 
   /** Stop the helper. */

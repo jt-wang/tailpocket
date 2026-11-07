@@ -87,6 +87,38 @@ func roundTrip(t *testing.T, ctx context.Context, dial func(context.Context) (ne
 	}
 }
 
+// timedOut reports a read deadline, from a local socket or a Tailcat (gVisor) connection.
+func timedOut(err error) bool {
+	var ne net.Error
+	return errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout())
+}
+
+// held dials once and reads the greeting, leaving the connection open for the caller.
+func held(t *testing.T, ctx context.Context, s *connectphone.Session, wantPhone string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	var conn net.Conn
+	var err error
+	for ctx.Err() == nil {
+		attempt, cancel := context.WithTimeout(ctx, 20*time.Second)
+		conn, err = s.Dial(attempt)
+		cancel()
+		if err == nil {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+	r := bufio.NewReader(conn)
+	if g, err := r.ReadString('\n'); err != nil || strings.TrimSpace(g) != wantPhone {
+		t.Fatalf("greeting %q %v", g, err)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	return conn, r
+}
+
 func TestLiveQRPairConnectRestartRevoke(t *testing.T) {
 	live(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
@@ -177,10 +209,44 @@ func TestLiveQRPairConnectRestartRevoke(t *testing.T) {
 	}
 	defer fw.Close()
 
+	// A second phone pairs and keeps a connection open across the first phone's revoke.
+	p2, err := h2.Pair(ctx, connecthost.PairOptions{TTL: 3 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKey := connectphone.NewKey()
+	otherPub, _ := connectphone.PublicKey(otherKey)
+	pairCtx, pairCancel = context.WithTimeout(ctx, 90*time.Second)
+	otherLink, err := connectphone.Pair(pairCtx, p2.Invite(), otherKey, connectphone.Options{Device: "e2e phone 2"})
+	pairCancel()
+	if err != nil {
+		t.Fatalf("pair second phone: %v", err)
+	}
+	other, _ := connectphone.Connect(otherLink, connectphone.Options{})
+	defer other.Close()
+	otherConn, otherR := held(t, ctx, other, otherPub)
+	defer otherConn.Close()
+	firstConn, firstR := held(t, ctx, s2, phonePub)
+	defer firstConn.Close()
+
 	// Revoke: the phone can no longer reach the host.
+	revokedAt := time.Now()
 	if err := h2.Revoke(ctx, phonePub); err != nil {
 		t.Fatal(err)
 	}
+	_ = firstConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if _, err := firstR.ReadString('\n'); err == nil || timedOut(err) {
+		t.Fatalf("the revoked phone's open connection was not closed: %v", err)
+	}
+	t.Logf("revoked phone's open connection closed after %v", time.Since(revokedAt).Round(time.Millisecond))
+	_ = otherConn.SetDeadline(time.Now().Add(20 * time.Second))
+	if _, err := io.WriteString(otherConn, "still here\n"); err != nil {
+		t.Fatalf("other phone's connection after the revoke: %v", err)
+	}
+	if echo, err := otherR.ReadString('\n'); err != nil || echo != "still here\n" {
+		t.Fatalf("other phone's connection dropped by the revoke: %q %v", echo, err)
+	}
+	t.Log("other phone's open connection survived the revoke")
 	s3, _ := connectphone.Connect(link, connectphone.Options{})
 	defer s3.Close()
 	revokedCtx, revokedCancel := context.WithTimeout(ctx, 15*time.Second)

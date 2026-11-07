@@ -103,11 +103,16 @@ func (l *chanListener) offer(c net.Conn) {
 }
 
 func (l *chanListener) Accept() (net.Conn, error) {
-	select {
-	case c := <-l.conns:
-		return c, nil
-	case <-l.done:
-		return nil, net.ErrClosed
+	for {
+		select {
+		case c := <-l.conns:
+			if pc, ok := c.(*Conn); ok && pc.revoked.Load() {
+				continue // closed by Revoke before the app took it
+			}
+			return c, nil
+		case <-l.done:
+			return nil, net.ErrClosed
+		}
 	}
 }
 

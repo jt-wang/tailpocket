@@ -8,6 +8,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +31,7 @@ type fakeNode struct {
 	mu      sync.Mutex
 	allowed []key.NodePublic
 	closed  bool
+	conns   []net.Conn // host sides of dialed connections; closing the node closes them, as Tailcat does
 }
 
 func (n *fakeNode) Address() string             { return n.addr }
@@ -42,7 +45,31 @@ func (n *fakeNode) Close() error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.closed = true
+	for _, c := range n.conns {
+		_ = c.Close()
+	}
 	return nil
+}
+
+// dial opens a connection from phone to the node's main port, as Tailcat would: refused while the
+// node is closed or the key was never allowed, otherwise handed to the host's OnTCP handler.
+// It returns the phone's side.
+func (n *fakeNode) dial(t *testing.T, phone string) net.Conn {
+	t.Helper()
+	var k key.NodePublic
+	if err := k.UnmarshalText([]byte(phone)); err != nil {
+		t.Fatal(err)
+	}
+	n.mu.Lock()
+	if n.closed || !slices.Contains(n.allowed, k) {
+		n.mu.Unlock()
+		return nil
+	}
+	c, s := net.Pipe()
+	n.conns = append(n.conns, s)
+	n.mu.Unlock()
+	go n.spec.onTCP(n.spec.port)(&addrConn{Conn: s, remote: &net.TCPAddr{IP: clientIP(k).AsSlice(), Port: 40000}})
+	return c
 }
 func (n *fakeNode) isClosed() bool {
 	n.mu.Lock()
@@ -332,7 +359,7 @@ func TestSaveFailureRefusesThePhone(t *testing.T) {
 	}
 }
 
-func TestSecondPhoneJoinsWithoutRestartAndRevokeRestarts(t *testing.T) {
+func TestSecondPhoneJoinsAndRevokeWithoutRestart(t *testing.T) {
 	_, a := phoneKey(t)
 	h, f, s := newTestHost(t, Config{Allowed: []string{a}})
 	first := f.live(DefaultPort)
@@ -351,12 +378,11 @@ func TestSecondPhoneJoinsWithoutRestartAndRevokeRestarts(t *testing.T) {
 	if err := h.Revoke(context.Background(), a); err != nil {
 		t.Fatal(err)
 	}
-	second := f.live(DefaultPort)
-	if second == first || !first.isClosed() || second.allows(a) || !second.allows(b) {
-		t.Fatal("revoke must restart the main node without the revoked key")
+	if f.live(DefaultPort) != first || first.isClosed() {
+		t.Fatal("revoking one of two phones restarted the main node")
 	}
 	if h.Address() != addr {
-		t.Fatal("address changed across a restart")
+		t.Fatal("address changed")
 	}
 	if st := s.last(); len(st.Allowed) != 1 || st.Allowed[0] != b {
 		t.Fatalf("saved %+v", st)
@@ -462,4 +488,219 @@ func TestLocalPairingDeliversTheInvite(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-stopped
+}
+
+// accept takes the next connection from the host's listener, failing after a few seconds.
+func accept(t *testing.T, h *Host) net.Conn {
+	t.Helper()
+	type res struct {
+		c   net.Conn
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() { c, err := h.Listener().Accept(); ch <- res{c, err} }()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		return r.c
+	case <-time.After(3 * time.Second):
+		t.Fatal("no connection reached the listener")
+		return nil
+	}
+}
+
+// open reports whether bytes still flow from the phone's side to the app's side.
+func open(phoneSide, appSide net.Conn) bool {
+	go func() {
+		_ = phoneSide.SetWriteDeadline(time.Now().Add(time.Second))
+		_, _ = phoneSide.Write([]byte("x"))
+	}()
+	_ = appSide.SetReadDeadline(time.Now().Add(time.Second))
+	defer appSide.SetReadDeadline(time.Time{})
+	_, err := io.ReadFull(appSide, make([]byte, 1))
+	return err == nil
+}
+
+// closedByHost reports whether the host closed the phone's side: a read ends at once instead of waiting.
+func closedByHost(phoneSide net.Conn) bool {
+	_ = phoneSide.SetReadDeadline(time.Now().Add(time.Second))
+	_, err := phoneSide.Read(make([]byte, 1))
+	return err != nil && !errors.Is(err, os.ErrDeadlineExceeded)
+}
+
+func TestRevokeClosesOnlyThatPhone(t *testing.T) {
+	_, a := phoneKey(t)
+	_, b := phoneKey(t)
+	h, f, s := newTestHost(t, Config{Allowed: []string{a, b}})
+	main := f.live(DefaultPort)
+	phoneA := main.dial(t, a)
+	appA := accept(t, h)
+	phoneB := main.dial(t, b)
+	appB := accept(t, h)
+	if PhoneOf(appA) != a || PhoneOf(appB) != b {
+		t.Fatalf("PhoneOf = %q, %q", PhoneOf(appA), PhoneOf(appB))
+	}
+
+	if err := h.Revoke(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	if !open(phoneB, appB) {
+		t.Fatal("revoking a dropped the other phone's connection")
+	}
+	if f.live(DefaultPort) != main {
+		t.Fatal("revoke restarted the main node")
+	}
+	if !closedByHost(phoneA) {
+		t.Fatal("the revoked phone's connection is still open")
+	}
+	if st := s.last(); len(st.Allowed) != 1 || st.Allowed[0] != b {
+		t.Fatalf("saved %+v", st)
+	}
+	if got := h.Allowed(); len(got) != 1 || got[0] != b {
+		t.Fatalf("Allowed = %v", got)
+	}
+
+	// Stays refused: Tailcat still knows the key, so the host must close the new connection itself.
+	if again := main.dial(t, a); again == nil || !closedByHost(again) {
+		t.Fatal("the revoked phone opened a new connection")
+	}
+	// The listener hands the app b's next connection, never a's.
+	phoneB2 := main.dial(t, b)
+	if appB2 := accept(t, h); PhoneOf(appB2) != b || !open(phoneB2, appB2) {
+		t.Fatalf("next connection from %q", PhoneOf(appB2))
+	}
+}
+
+func TestRevokeRefusesAConnectionAlreadyBeingDialed(t *testing.T) {
+	_, a := phoneKey(t)
+	_, b := phoneKey(t)
+	h, f, _ := newTestHost(t, Config{Allowed: []string{a, b}})
+	main := f.live(DefaultPort)
+	// a's connection has reached the host but the app has not accepted it yet.
+	pending := main.dial(t, a)
+	time.Sleep(50 * time.Millisecond)
+	if err := h.Revoke(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	if !closedByHost(pending) {
+		t.Fatal("a connection dialed before the revoke stayed open")
+	}
+	phoneB := main.dial(t, b)
+	if app := accept(t, h); PhoneOf(app) != b || !open(phoneB, app) {
+		t.Fatalf("the listener handed over a connection from %q", PhoneOf(app))
+	}
+}
+
+func TestRevokeRacingDials(t *testing.T) {
+	_, a := phoneKey(t)
+	_, b := phoneKey(t)
+	h, f, _ := newTestHost(t, Config{Allowed: []string{a, b}})
+	main := f.live(DefaultPort)
+	var accepted sync.Map // app-side conns from a
+	go func() {
+		for {
+			c, err := h.Listener().Accept()
+			if err != nil {
+				return
+			}
+			if PhoneOf(c) == a {
+				accepted.Store(c, true)
+			}
+		}
+	}()
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var phoneSides []net.Conn
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if c := main.dial(t, a); c != nil {
+					mu.Lock()
+					phoneSides = append(phoneSides, c)
+					mu.Unlock()
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}()
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := h.Revoke(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	close(stop)
+	wg.Wait()
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(phoneSides) == 0 {
+		t.Fatal("no dials ran")
+	}
+	for _, c := range phoneSides {
+		if !closedByHost(c) {
+			t.Fatal("a connection from the revoked phone is still open")
+		}
+	}
+}
+
+func TestRevokeSaveFailureChangesNothing(t *testing.T) {
+	_, a := phoneKey(t)
+	_, b := phoneKey(t)
+	h, f, s := newTestHost(t, Config{Allowed: []string{a, b}})
+	main := f.live(DefaultPort)
+	phoneA := main.dial(t, a)
+	appA := accept(t, h)
+	s.mu.Lock()
+	s.fail = true
+	s.mu.Unlock()
+	if err := h.Revoke(context.Background(), a); err == nil {
+		t.Fatal("revoke succeeded although saving failed")
+	}
+	if len(h.Allowed()) != 2 || !open(phoneA, appA) {
+		t.Fatal("a failed revoke still removed the phone")
+	}
+}
+
+func TestRevokedPhoneCanPairAgain(t *testing.T) {
+	_, a := phoneKey(t)
+	_, b := phoneKey(t)
+	h, f, _ := newTestHost(t, Config{Allowed: []string{a, b}})
+	if err := h.Revoke(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := h.Pair(context.Background(), PairOptions{})
+	if code, _ := postPair(t, f.live(DefaultPairingPort), p.Invite(), p.Invite().Proof, a, "a"); code != 200 {
+		t.Fatalf("pair a again: %d", code)
+	}
+	phoneA := f.live(DefaultPort).dial(t, a)
+	if app := accept(t, h); PhoneOf(app) != a || !open(phoneA, app) {
+		t.Fatal("the re-paired phone cannot connect")
+	}
+}
+
+func TestSetAllowedClosesRemovedPhones(t *testing.T) {
+	_, a := phoneKey(t)
+	_, b := phoneKey(t)
+	h, f, _ := newTestHost(t, Config{Allowed: []string{a, b}})
+	phoneA := f.live(DefaultPort).dial(t, a)
+	accept(t, h)
+	if err := h.SetAllowed(context.Background(), []string{b}); err != nil {
+		t.Fatal(err)
+	}
+	if !closedByHost(phoneA) || f.live(DefaultPort).dial(t, a) != nil {
+		t.Fatal("SetAllowed left the removed phone connected")
+	}
+	phoneB := f.live(DefaultPort).dial(t, b)
+	if app := accept(t, h); PhoneOf(app) != b || !open(phoneB, app) {
+		t.Fatal("the kept phone cannot connect after SetAllowed")
+	}
 }
