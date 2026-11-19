@@ -536,8 +536,13 @@ func TestRelayDownFallsBackToLAN(t *testing.T) {
 	}
 	srv.Close()
 	ts.Close()
+	// The phone learns the relay is gone from the EOF on its session, which may arrive after the
+	// relay has closed: a request in that gap goes out on the dead session and fails, like one in
+	// flight. The next one must go over lan.
 	if _, err := get(t, s); err != nil {
-		t.Fatalf("after the relay stopped: %v", err)
+		if _, err := get(t, s); err != nil {
+			t.Fatalf("after the relay stopped: %v", err)
+		}
 	}
 	if route, _, _ := s.Path(context.Background()); route != "lan" {
 		t.Fatalf("path %q, want lan", route)

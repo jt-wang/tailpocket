@@ -74,7 +74,7 @@ func Serve(ctx context.Context, opts HostOptions) error {
 		listeners = append(listeners, ln)
 	}
 
-	s := &server{opts: opts, hello: hello, window: window, done: make(chan struct{}), lastAnswer: map[string]time.Time{}}
+	s := &server{opts: opts, hello: hello, gap: sourceGap, window: window, done: make(chan struct{}), lastAnswer: map[string]time.Time{}}
 	var wg sync.WaitGroup
 	for i, ln := range listeners {
 		wg.Add(1)
@@ -113,6 +113,7 @@ func Serve(ctx context.Context, opts HostOptions) error {
 type server struct {
 	opts     HostOptions
 	hello    time.Duration
+	gap      time.Duration // sourceGap when Serve started
 	window   context.Context
 	mu       sync.Mutex
 	busy     bool
@@ -164,11 +165,17 @@ func (s *server) handle(conn net.Conn, b Binding) {
 	}
 	s.busy = true
 	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.busy = false
-		s.mu.Unlock()
-	}()
+	// release frees the single slot. A denied phone may redial the moment it reads the denial, so
+	// the slot is freed before the denial is written, not after.
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			s.mu.Lock()
+			s.busy = false
+			s.mu.Unlock()
+		})
+	}
+	defer release()
 
 	// From here on, anything unexpected closes the connection without a reply: no fallback to v1.
 	// A silent peer must not hold the single slot for the whole window: the commitment and the
@@ -196,16 +203,19 @@ func (s *server) handle(conn net.Conn, b Binding) {
 	// address every SourceGap, and then ends.
 	s.mu.Lock()
 	source := remote.IP.String()
-	if s.attempts >= MaxAttempts || time.Since(s.lastAnswer[source]) < sourceGap {
+	if s.attempts >= MaxAttempts || time.Since(s.lastAnswer[source]) < s.gap {
 		s.mu.Unlock()
 		return
 	}
 	s.attempts++
+	// This handler's own attempt number: the slot may be free again before its deferred check
+	// runs, and the next phone's attempt must not end the window under that phone.
+	nth := s.attempts
 	s.lastAnswer[source] = time.Now()
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		end := !s.approved && s.attempts >= MaxAttempts
+		end := !s.approved && nth >= MaxAttempts
 		if end {
 			s.tooMany = true
 		}
@@ -253,6 +263,7 @@ func (s *server) handle(conn net.Conn, b Binding) {
 	}()
 	allowed := s.opts.Confirm(decide, session.Code, device)
 	if !allowed || decide.Err() != nil || s.expired() {
+		release()
 		_ = writeLine(conn, s.denial())
 		return
 	}

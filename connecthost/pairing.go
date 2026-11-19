@@ -243,7 +243,14 @@ func (p *Pairing) Wait(ctx context.Context) (Phone, error) {
 func (p *Pairing) Done() <-chan struct{} { return p.ended }
 
 // Close ends the window early. A phone that already joined stays paired.
-func (p *Pairing) Close() {
+func (p *Pairing) Close() { p.end(0) }
+
+// byeLinger is how long the window's Tailcat node outlives a refusal, so the bye that tells the
+// phone goes out over it; the window itself ends at once.
+const byeLinger = 3 * time.Second
+
+// end ends the window, and closes its Tailcat node after linger.
+func (p *Pairing) end(linger time.Duration) {
 	p.endOnce.Do(func() {
 		p.mu.Lock()
 		if p.timer != nil {
@@ -254,8 +261,12 @@ func (p *Pairing) Close() {
 			_ = p.server.Close()
 		}
 		_ = p.ln.Close()
-		if p.node != nil {
-			_ = p.node.Close()
+		if n := p.node; n != nil {
+			if linger > 0 {
+				time.AfterFunc(linger, func() { _ = n.Close() })
+			} else {
+				_ = n.Close()
+			}
 		}
 		p.h.mu.Lock()
 		delete(p.h.pairings, p)
@@ -406,7 +417,9 @@ func (p *Pairing) confirmed(ctx context.Context, k key.NodePublic, device, route
 	p.mu.Unlock()
 	if !ok {
 		p.h.record(Event{Kind: EventDenied, Phone: k.String(), Route: route, Reason: "not-confirmed"})
-		p.Close() // a no, a timeout or a phone gone: this code is spent
+		// A no, a timeout or a phone gone: this code is spent. The refusal's bye still has to
+		// reach the phone, over the window's node when it came that way.
+		p.end(byeLinger)
 	}
 	return ok
 }

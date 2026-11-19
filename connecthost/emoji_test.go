@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"net"
 	"net/http"
 	"slices"
@@ -44,6 +45,9 @@ func noisePairOverTailcat(t *testing.T, n *fakeNode, inv connectinvite.V2, k key
 	var server [32]byte
 	copy(server[:], raw)
 	c, s := net.Pipe()
+	n.mu.Lock()
+	n.conns = append(n.conns, s) // closing the node breaks it, as Tailcat does
+	n.mu.Unlock()
 	go n.spec.onTCP(DefaultPairingPort)(s)
 	return connectsecure.Dial(c, connectsecure.ClientConfig{Static: static, Server: server,
 		Pair:   &connectsecure.PairHello{CID: connectsecure.CIDFor(inv.PSK), PSK: connectsecure.PSKFor(inv.PSK)},
@@ -109,8 +113,10 @@ func TestEmojiRefusedOrAbandonedEndsWindow(t *testing.T) {
 			}
 			inv, node := p.InviteV2(), pairingNode(t, f)
 			if tc == "refused" {
-				if _, err := noisePairOverTailcat(t, node, inv, key.NewNode(), func([]string) {}); err == nil {
-					t.Fatal("a refused pairing went through")
+				// The no ends the window, but its bye still reaches the phone over the window's node:
+				// the phone hears "denied" now, not a broken connection after its timeout.
+				if _, err := noisePairOverTailcat(t, node, inv, key.NewNode(), func([]string) {}); !errors.Is(err, connectsecure.ErrDenied) {
+					t.Fatalf("refused pairing: %v, want ErrDenied", err)
 				}
 			} else {
 				done := make(chan error, 1)

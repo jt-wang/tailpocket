@@ -7,7 +7,7 @@ it; `go test -race ./...` runs them, and `TAILPOCKET_LIVE=1` adds the ones on th
 network. The wire formats are in [PROTOCOL.md](PROTOCOL.md).
 
 Audits this covers: the third-round cryptography audit of 83d4174 (H1, D1, L1, P1–P3, I1–I4), the
-fail-closed audit of 83d4174 (O1, F1, T1, G1, G2, M1, F2, K1, N1, R1, A1) the pre.4 review
+fail-closed audit of 83d4174 (O1, F1, T1, G1, G2, M1, F2, K1, N1, R1, A1), the pre.4 review
 (H1 retries, branch `audit-v03-pre4` 64f7145) and the pre.5 review (L2, branch `audit-v03-pre5` db527de). Their failing tests
 (branches `audit-v03-crypto` 2be300d and `audit-v03-failclosed` fb4b23e) are in this tree and pass.
 
