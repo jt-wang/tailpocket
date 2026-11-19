@@ -1,6 +1,6 @@
 {
   "name": "react-native-tailpocket",
-  "version": "0.3.0-pre.8",
+  "version": "0.3.0-pre.9",
   "description": "Pair a React Native app with a computer by QR code or same Wi-Fi, then reach it from anywhere over Tailcat.",
   "license": "MIT",
   "main": "src/index.ts",

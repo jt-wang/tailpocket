@@ -91,6 +91,8 @@ type Pairing struct {
 	ended    chan struct{}
 	joinOnce sync.Once
 	endOnce  sync.Once
+	nodeOnce sync.Once
+	linger   *time.Timer // closes the node byeLinger after a refusal
 	timer    *time.Timer
 }
 
@@ -242,8 +244,29 @@ func (p *Pairing) Wait(ctx context.Context) (Phone, error) {
 // Done is closed when the window has closed (expired, Close, or after a phone joined).
 func (p *Pairing) Done() <-chan struct{} { return p.ended }
 
-// Close ends the window early. A phone that already joined stays paired.
-func (p *Pairing) Close() { p.end(0) }
+// Close ends the window early, and closes its Tailcat node now, also when a refusal left it
+// lingering. A phone that already joined stays paired.
+func (p *Pairing) Close() {
+	p.end(0)
+	p.closeNode()
+}
+
+// closeNode closes the window's Tailcat node once, and forgets the window on the Host.
+func (p *Pairing) closeNode() {
+	p.nodeOnce.Do(func() {
+		p.mu.Lock()
+		if p.linger != nil {
+			p.linger.Stop()
+		}
+		p.mu.Unlock()
+		if p.node != nil {
+			_ = p.node.Close()
+		}
+		p.h.mu.Lock()
+		delete(p.h.linger, p)
+		p.h.mu.Unlock()
+	})
+}
 
 // byeLinger is how long the window's Tailcat node outlives a refusal, so the bye that tells the
 // phone goes out over it; the window itself ends at once.
@@ -261,17 +284,20 @@ func (p *Pairing) end(linger time.Duration) {
 			_ = p.server.Close()
 		}
 		_ = p.ln.Close()
-		if n := p.node; n != nil {
-			if linger > 0 {
-				time.AfterFunc(linger, func() { _ = n.Close() })
-			} else {
-				_ = n.Close()
-			}
-		}
 		p.h.mu.Lock()
 		delete(p.h.pairings, p)
 		delete(p.h.windows, p.cid)
+		if linger > 0 {
+			p.h.linger[p] = struct{}{} // Host.Close still reaches the node
+		}
 		p.h.mu.Unlock()
+		if linger > 0 {
+			p.mu.Lock()
+			p.linger = time.AfterFunc(linger, p.closeNode)
+			p.mu.Unlock()
+		} else {
+			p.closeNode()
+		}
 		close(p.ended)
 	})
 }

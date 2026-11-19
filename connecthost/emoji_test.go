@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,5 +204,15 @@ func TestPhoneWithoutEmojiIsRefused(t *testing.T) {
 	}
 	if _, err := noisePairOverTailcat(t, pairingNode(t, f), p.InviteV2(), key.NewNode(), nil); err == nil {
 		t.Fatal("a phone that shows no emoji paired")
+	}
+}
+
+// L3: a refused window's lingering node is still the Host's: Host.Close closes it at once.
+func TestHostCloseClosesARefusedWindowsNode(t *testing.T) {
+	var asked atomic.Int32
+	h, _, node := refusedWindow(t, &asked)
+	_ = h.Close()
+	if !nodeClosed(node) {
+		t.Fatal("Host.Close left a refused window's Tailcat node running")
 	}
 }

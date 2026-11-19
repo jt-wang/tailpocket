@@ -127,6 +127,7 @@ type Host struct {
 	conns    map[*Conn]struct{}    // admitted connections not yet closed
 	main     node
 	pairings map[*Pairing]struct{}
+	linger   map[*Pairing]struct{} // ended windows whose Tailcat node outlives a refusal (byeLinger)
 	closed   bool
 
 	noise    map[key.NodePublic][32]byte       // phone -> its Noise public key
@@ -142,7 +143,7 @@ func New(cfg Config) (*Host, error) {
 		return nil, errors.New("connecthost: Config.Save is required")
 	}
 	h := &Host{name: connectinvite.CleanName(cfg.Name), port: cfg.Port, pairingPort: cfg.PairingPort, save: cfg.Save,
-		derpMapURL: cfg.DERPMapURL, start: realStart, listener: newChanListener(), pairings: map[*Pairing]struct{}{},
+		derpMapURL: cfg.DERPMapURL, start: realStart, listener: newChanListener(), pairings: map[*Pairing]struct{}{}, linger: map[*Pairing]struct{}{},
 		conns: map[*Conn]struct{}{}, controlPort: DefaultControlPort, control: newChanListener(), relays: cfg.Relays,
 		listen: cfg.Listen, autoLANOn: !cfg.NoLAN && !cfg.TailcatOnly && len(cfg.Listen) == 0,
 		authorize: cfg.Authorize, audit: cfg.Audit,
@@ -558,6 +559,9 @@ func (h *Host) Close() error {
 	h.main = nil
 	pairings := make([]*Pairing, 0, len(h.pairings))
 	for p := range h.pairings {
+		pairings = append(pairings, p)
+	}
+	for p := range h.linger {
 		pairings = append(pairings, p)
 	}
 	routeLns := h.routeLns
