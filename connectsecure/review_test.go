@@ -166,7 +166,7 @@ func phoneUpToHello(t *testing.T, conn net.Conn, cc ClientConfig) (*Session, int
 	if err != nil {
 		t.Fatal(err)
 	}
-	m0, _, _, _ := hs.WriteMessage(nil, []byte(fmt.Sprintf(`{"proto":%d}`, Proto)))
+	m0, _, _, _ := hs.WriteMessage(nil, []byte(fmt.Sprintf(`{"proto":%d}`, ConnectProto)))
 	if _, err := rec.Write(appendFrame([]byte("TP2C"), m0)); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func phoneUpToHello(t *testing.T, conn net.Conn, cc ClientConfig) (*Session, int
 		t.Fatal(err)
 	}
 	s := newSession(rec, true, send, recv, cc.Server, Timing{}.withDefaults())
-	if err := s.ctrl.Send(helloMsg{Type: "hello", Proto: Proto}); err != nil {
+	if err := s.ctrl.Send(helloMsg{Type: "hello", Proto: ConnectProto}); err != nil {
 		t.Fatal(err)
 	}
 	return s, len(rec.bytes())
@@ -651,8 +651,8 @@ func TestUndoWhenAdmitTooSlow(t *testing.T) {
 	k := newKeys(t)
 	var undos atomic.Int32
 	sc := k.server(newOnceCodes(testCode).PSK)
-	sc.Timing.Handshake = 300 * time.Millisecond
-	sc.Admit = countUndo(400*time.Millisecond, &undos)
+	sc.Timing.Handshake, sc.Timing.Confirm = 300*time.Millisecond, 100*time.Millisecond // a pairing gets both
+	sc.Admit = countUndo(500*time.Millisecond, &undos)
 	d, r := handshakePipe(t, k.client(true), sc)
 	if r.err == nil || r.s != nil || d.err == nil {
 		t.Fatalf("handshake went through: dial %v, accept %v", d.err, r.err)

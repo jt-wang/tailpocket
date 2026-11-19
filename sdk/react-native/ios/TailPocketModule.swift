@@ -17,7 +17,8 @@ final class TailPocketModule: RCTEventEmitter {
         })
 
     override static func requiresMainQueueSetup() -> Bool { false }
-    override func supportedEvents() -> [String] { ["tailPocket.nearby"] }
+    /// Every event TailPocketBridge emits; RCTEventEmitter drops any other.
+    override func supportedEvents() -> [String] { ["tailPocket.nearby", "tailPocket.pair.emoji"] }
     override func startObserving() { listening = true }
     override func stopObserving() { listening = false }
 

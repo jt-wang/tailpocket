@@ -132,12 +132,16 @@ final class LiveTests: XCTestCase {
             throw lastError
         }
 
-        // A new phone pairs from the v2 QR over the relay alone.
+        // A new phone pairs from the v2 QR over the relay alone; both sides show the same emoji, and the
+        // helper's user (Helper) confirms.
         let invite = try TailPocket.decodeInvite2(try helper.pair(payload: "relay-token", field: "qr2"))
         let relayOnly = TailPocketInvite2(v: invite.v, name: invite.name, exp: invite.exp, pk: invite.pk, psk: invite.psk,
                                           via: invite.via.filter { $0.t == "relay" })
         XCTAssertEqual(relayOnly.via.count, 1)
-        let paired = try await TailPocket.pair(relayOnly, phoneKey: TailPocket.newKey(), device: "swift relay phone")
+        var shown: [String] = []
+        let paired = try await TailPocket.pair(relayOnly, phoneKey: TailPocket.newKey(), device: "swift relay phone") { shown = $0 }
+        XCTAssertEqual(shown.count, 4)
+        XCTAssertEqual(shown, helper.requestEmoji)
         XCTAssertEqual(paired.payload, "relay-token")
         XCTAssertNotNil(paired.hostKey)
         let overRelay = TailPocketHostLink(address: "", port: 0, name: paired.name, payload: paired.payload, key: paired.key,
@@ -208,6 +212,9 @@ final class Helper: @unchecked Sendable {
     let input = Pipe()
     let output = Pipe()
     var lastPairing = ""
+    /// The emoji of the last pairRequest, which this helper's "user" approves at once.
+    var requestEmoji: [String]? { lock.lock(); defer { lock.unlock() }; return lastEmoji }
+    private var lastEmoji: [String]?
     private var serial = 0
     private let lock = NSCondition()
     private var events: [[String: Any]] = []
@@ -241,6 +248,10 @@ final class Helper: @unchecked Sendable {
                 buffer.removeSubrange(buffer.startIndex...newline)
                 guard let event = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { continue }
                 if event["event"] as? String == "save" { send(["cmd": "saved", "id": event["id"]!, "ok": true]) }
+                if event["event"] as? String == "pairRequest" {
+                    lock.lock(); lastEmoji = event["emoji"] as? [String]; lock.unlock()
+                    send(["cmd": "confirm", "id": event["id"]!, "approve": true])
+                }
                 lock.lock(); events.append(event); lock.broadcast(); lock.unlock()
             }
         }
@@ -253,10 +264,11 @@ final class Helper: @unchecked Sendable {
         input.fileHandleForWriting.write(data)
     }
 
+    /// Opens a window and returns its "qr" (v1), or its "qr2" from an emoji window.
     func pair(payload: String, field: String = "qr") throws -> String {
         serial += 1
         lastPairing = "p\(serial)"
-        send(["cmd": "pair", "id": lastPairing, "ttl": 180, "payload": payload])
+        send(["cmd": "pair", "id": lastPairing, "ttl": 180, "payload": payload, "emoji": field == "qr2"])
         return try waitEvent("pairing")[field] as! String
     }
 

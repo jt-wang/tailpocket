@@ -19,12 +19,13 @@ The first line you write is the configuration:
 `forward` is `host:port` or `unix:/path`. Zero ports mean the defaults (48931, 48932). Then the
 helper writes `{"event":"ready","address":"…"}`; `address` is `""` until the first phone pairs.
 
-v0.3 adds optional fields (the config stays `"v":1`; leave them out and nothing changes):
+v0.3 adds optional fields (the config stays `"v":1`; leave them out and nothing changes, except that
+since v0.3.0-pre.4 the `lan` route is on by default, see `listen`):
 
 ```json
 {"keys":{"nodekey:…":"<Noise key>"},
- "relays":[{"url":"wss://relay.example.com","token":"<relay token>","opaque":false}],
- "listen":["192.168.1.20:7681"],"authorize":true,"audit":true}
+ "relays":[{"url":"wss://relay.example.com","token":"<relay token>","opaque":false,"appAuth":false}],
+ "listen":["192.168.1.20:7681"],"noLan":false,"tailcatOnly":false,"authorize":true,"audit":true}
 ```
 
 - `keys`: `state.keys` from the last `save`. Without it, phones paired over the encrypted routes have
@@ -32,20 +33,40 @@ v0.3 adds optional fields (the config stays `"v":1`; leave them out and nothing 
 - `relays`: tailpocket-relay servers to register with (`wss://`; `ws://` only to loopback). The token
   goes over stdin, never on a command line. `opaque: true` passes the phone's bytes to `forward`
   without TailPocket's encryption, for apps that run their own pinned TLS; those connections carry no
-  phone key (`identifyPhone` writes an empty line).
+  phone key (`identifyPhone` writes an empty line) and `authorize` does not run for them.
+- `appAuth` (v0.3.0-pre.4, per relay): required with `opaque: true`; see below. An opaque relay
+  without it is `invalid-config` and the helper exits.
 - `listen`: addresses the host accepts encrypted connections on directly (route `lan`). Give
-  addresses phones can dial; `0.0.0.0` and `::` are refused.
+  addresses phones can dial; `0.0.0.0` and `::` are refused. Since v0.3.0-pre.4 the `lan` route is on
+  by default: with no `listen`, the host listens on every private address of the computer's Wi-Fi and
+  Ethernet, follows them as they change, and uses a port derived from its key.
+- `noLan` (v0.3.0-pre.4): no `lan` route at all: no listener, and invites and `status` routes list
+  none. Together with `listen` it is `invalid-config`.
+- `tailcatOnly` (v0.3.0-pre.4): the host as before v0.3: Tailcat only. It opens no local network
+  listener, registers with no relay, and v2 invites and `status` routes list only Tailcat. Together with `relays` or
+  `listen` it is `invalid-config`.
 - `authorize`: every connection from a known phone waits for your `authorized` answer (5 s, then
   denied).
 - `audit`: `audit` events for pairings, revokes, sessions and refusals.
+
+### Opaque relays: your app MUST authenticate every connection
+
+An opaque relay hands your `forward` port raw bytes from anyone who knows the relay room: TailPocket
+checks no phone key on them, and `authorize` and `identifyPhone` see none. An app that configures an
+opaque relay MUST therefore authenticate every connection itself before acting on it, for example
+the way DSH does: TLS to a certificate key the phone pinned at pairing, plus a per-device bearer token
+(delivered in the pairing `payload`) checked on every connection and revocable on its own. It MUST
+then set `"appAuth": true` on that relay to declare that it does. Without `appAuth` the helper refuses
+to start (`invalid-config`). `appAuth` is a promise you make, not something the helper can check: do
+not set it to get past the error.
 
 ## Commands (you → helper)
 
 | Command | Fields | Effect |
 |---|---|---|
-| `pair` | `id`, `ttl` (seconds), `payload`, `qrPrefix` | open a pairing window |
+| `pair` | `id`, `ttl` (seconds), `payload`, `qrPrefix`, `qrPrefix2`, `emoji` | open a pairing window (see Pairing below) |
 | `local` | `id` (of an open window), `service`, `label`, `instance` | also offer it over Bonjour |
-| `confirm` | `id`, `approve` | answer a `localCode` |
+| `confirm` | `id` (of the window), `approve` | answer that window's `localCode` or `pairRequest` |
 | `cancel` | `id` | close a window |
 | `setAllowed` | `id`, `allowed` | replace the allowlist |
 | `revoke` | `id`, `phone` | remove one phone; its encrypted sessions get bye `unpaired` |
@@ -60,9 +81,11 @@ v0.3 adds optional fields (the config stays `"v":1`; leave them out and nothing 
 |---|---|---|
 | `ready` | `address` | started |
 | `save` | `id`, `state` (`{identity, allowed, keys}`) | store this, then send `saved`; the change waits for it |
-| `pairing` | `id`, `qr`, `invite`, `qr2`, `invite2`, `expiresAt` | show `qr2` as a QR code to v0.3 phones, `qr` to older ones |
+| `pairing` | `id`, `expiresAt`, and `qr`, `invite` (v1 window) or `qr2`, `invite2` (`emoji` window) | show the QR text as a QR code or link |
+| `pairRequest` | `id`, `phone`, `device`, `route` (`tailcat`, `relay`, `lan`), `emoji` (four, or null) | `emoji` windows: ask the user; send `confirm` |
+| `pairRequestCancelled` | `id` | the phone left, the window closed, or 55 s passed before your `confirm`; the code is spent |
 | `paired` | `id`, `phone`, `device`, `address` | a phone joined |
-| `pairingClosed` | `id`, `reason` (`paired`, `expired`, `stopped`) | the window ended |
+| `pairingClosed` | `id`, `reason` (`paired`, `expired`, `stopped`) | the window ended (a refused `pairRequest` ends it as `expired`) |
 | `localCode` | `id`, `code`, `device` | show the code; ask the user; send `confirm` |
 | `localCancelled` | `id` | the phone left before the user decided |
 | `localDelivered` | `id` | the invite went to the approved phone |
@@ -73,9 +96,32 @@ v0.3 adds optional fields (the config stays `"v":1`; leave them out and nothing 
 | `status` | `id`, `address`, `routes`, `relays` (`{url: "up" or why not}`) | answers `status` |
 | `error` | `code`, `id` (when it answers a command) | see below |
 
+## Pairing
+
+`pair` opens one of two kinds of window:
+
+- Without `emoji` (as before v0.3.0-pre.4): a v1 window. `pairing` has `qr` and `invite` (prefix
+  `qrPrefix`, default `tailpocket1:`), and no `qr2`. Any phone holding the code joins over Tailcat.
+- With `"emoji": true`: a v2 window for v0.3 phones. `pairing` has `qr2` and `invite2` (prefix
+  `qrPrefix2`, default `tailpocket2:`), every route the host has, and no v1 `qr` or `invite`. Every
+  phone that pairs, over any route, first comes as a `pairRequest` with the four `emoji` its screen
+  shows. Show them with `device` and ask the computer's user whether the phone shows the same; answer
+  with `{"cmd":"confirm","id":…,"approve":true|false}` within 55 s. `true` lets the phone pair
+  (`save`, then `paired`). `false`, no answer in time, or a phone that goes away (`pairRequestCancelled`)
+  spends the code: the window closes with `pairingClosed` `expired`; open a new one to try again, and
+  the phone reports `unauthorized`. A phone that pairs through `local` gets a v1 invite from Bonjour
+  and comes as a `pairRequest` with `emoji: null`: it shows no emoji, so the user can only go by the
+  name (the six-digit `localCode` before it already matched the phone). A phone pairing again after a
+  lost reply is not asked twice.
+
+`confirm` answers whatever the window waits for: a `localCode` (the Bonjour code check, `local`) or
+a `pairRequest` (the emoji check, `emoji` windows). Each window waits for at most one at a time; with
+nothing waiting, `confirm` fails with `nothing-to-confirm`.
+
 Error codes. At start: `invalid-config`, `unsupported-version`, `invalid-forward`,
 `invalid-identity`, `invalid-allowed`, `start-failed` (these end the process); a bad `relays` or
-`listen` entry is `invalid-config`. For a command:
+`listen` entry, an opaque relay without `appAuth`, `tailcatOnly` with `relays` or `listen`, and `noLan`
+with `listen` are `invalid-config`. For a command:
 `invalid-command`, `unknown-command`, `duplicate-id`, `unknown-pairing`, `pair-failed`,
 `invalid-qr-prefix`, `local-unavailable`, `local-not-approved`, `local-failed`,
 `nothing-to-confirm`, `invalid-allowed`, `operation-failed`.

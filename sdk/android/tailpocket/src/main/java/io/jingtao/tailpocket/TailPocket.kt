@@ -6,6 +6,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.util.concurrent.Executors
@@ -78,16 +79,35 @@ data class TailPocketHostLink(
 }
 
 /**
- * A failure with a fixed code: invalid-invite, invalid-key, invalid-link, expired, unauthorized, taken,
+ * A failure with a fixed code: invalid-invite, invalid-key, invalid-link, expired, unauthorized (after the pairing
+ * emoji: the computer's user said no or the code was spent; show a new code on the computer), taken,
  * unreachable, revoked, mismatch, handshake-closed, denied, local-failed, cancelled, timeout, unknown-handle, failed.
  * Only "revoked" means the computer removed this phone: delete its link.
  */
 class TailPocketException(val code: String) : Exception(code)
 
-/** A local route to the computer: point OkHttp, HttpURLConnection or a WebSocket client at [baseUrl]. */
-class TailPocketConnection internal constructor(private val native: TailPocketNative, private val handle: Long, val port: Int) : AutoCloseable {
+/**
+ * A local route to the computer: point OkHttp, HttpURLConnection or a WebSocket client at [baseUrl].
+ *
+ * Any program on the phone can reach a loopback port, so the forward lets through only requests that carry [token].
+ * Build every URL by appending to [baseUrl] (`"$baseUrl/api/info"`; the computer sees `/api/info`). A URL resolved
+ * against "/" (OkHttp's `resolve("/api/info")`, `URL(URL(baseUrl), "/api/info")`) drops the prefix and gets 403.
+ */
+class TailPocketConnection internal constructor(
+    private val native: TailPocketNative,
+    private val handle: Long,
+    val port: Int,
+    /**
+     * The secret every connection to the forward presents. HTTP and WebSocket clients get it through [baseUrl] (or the
+     * header "Tailpocket-Token"); any other protocol (your own TLS) starts the connection with the line "TP-FWD <token>\n".
+     * Keep it in memory only: do not store or log it.
+     */
+    val token: String,
+    private val base: String,
+) : AutoCloseable {
     private var closed = false
-    val baseUrl: String get() = "http://127.0.0.1:$port"
+    /** http://127.0.0.1:<port>/_tailpocket/<token>: traffic continues to the computer with the prefix removed. */
+    val baseUrl: String get() = "http://127.0.0.1:$port$base"
 
     /** The link with the computer's latest routes; store it when it differs from the saved one. */
     fun currentLink(): TailPocketHostLink = decode(TailPocketHostLink.serializer(), native.link(handle))
@@ -129,6 +149,11 @@ internal fun <T> decode(serializer: kotlinx.serialization.KSerializer<T>, text: 
     return try { json.decodeFromString(serializer, text) } catch (_: Exception) { throw TailPocketException("failed") }
 }
 
+/** The emoji of a first-stage v2 pairing answer ({"emoji":[…]}), or null for anything else (a link, an error). */
+private fun emojiOf(text: String): List<String>? = try {
+    (json.parseToJsonElement(text).jsonObject["emoji"] as? JsonArray)?.map { it.jsonPrimitive.content }
+} catch (_: Exception) { null }
+
 /** Runs a blocking native call on its own thread; cancelling the coroutine cancels the native operation. */
 internal suspend fun blocking(native: TailPocketNative, op: Long, call: () -> String): String =
     suspendCancellableCoroutine { cont ->
@@ -148,11 +173,27 @@ class TailPocket private constructor(private val native: TailPocketNative) {
     /** Decodes a v2 invite with [prefix], or a v1 one (tailpocket1:) as a v2 invite with one tailcat route. */
     fun decodeInvite2(text: String, prefix: String = DEFAULT_PREFIX2): TailPocketInvite2 = decode(TailPocketInvite2.serializer(), native.decodeInvite2(text, prefix))
 
-    /** Pairs over whichever of the invite's routes works first; returns the [TailPocketHostLink] to store. */
-    suspend fun pair(invite: TailPocketInvite2, phoneKey: String, device: String, derpMapUrl: String = "", timeoutMs: Long = 90_000): TailPocketHostLink {
+    /**
+     * Pairs over whichever of the invite's routes works first; returns the [TailPocketHostLink] to store. Once the
+     * computer waits for its user to compare them, [onEmoji] gets four emoji: show them with "Check that your computer
+     * shows the same, then confirm there" and return; pairing then waits for the computer's answer (its user has up to
+     * a minute more than [timeoutMs]). A refusal there throws "unauthorized": ask for a new code on the computer. A
+     * phone pairing again after a lost reply gets the link without [onEmoji].
+     */
+    suspend fun pair(invite: TailPocketInvite2, phoneKey: String, device: String, derpMapUrl: String = "", timeoutMs: Long = 90_000,
+                     onEmoji: suspend (emoji: List<String>) -> Unit): TailPocketHostLink {
         val op = ops.incrementAndGet()
         val text = json.encodeToString(TailPocketInvite2.serializer(), invite)
-        return decode(TailPocketHostLink.serializer(), blocking(native, op) { native.pair2(op, text, phoneKey, device, derpMapUrl, timeoutMs) })
+        val first = blocking(native, op) { native.pair2(op, text, phoneKey, device, derpMapUrl, timeoutMs) }
+        val emoji = emojiOf(first) ?: return decode(TailPocketHostLink.serializer(), first)
+        try {
+            onEmoji(emoji)
+        } catch (e: Throwable) {
+            native.cancel(op)
+            throw e
+        }
+        // The native side's own deadline (timeoutMs and a minute, from the start) ends the wait first.
+        return decode(TailPocketHostLink.serializer(), blocking(native, op) { native.pair2Finish(op, timeoutMs + 60_000) })
     }
 
     /** Joins the computer's pairing window; returns the [TailPocketHostLink] to store. */
@@ -162,12 +203,19 @@ class TailPocket private constructor(private val native: TailPocketNative) {
         return decode(TailPocketHostLink.serializer(), blocking(native, op) { native.pair(op, text, phoneKey, device, derpMapUrl, timeoutMs) })
     }
 
+    /**
+     * The phone's preference to reach computers over Tailcat only: [pair], [connect] and [TailPocketConnection.sync] then
+     * never use the relay or local network routes a computer lists. Set it before [connect]; open connections keep theirs.
+     */
+    fun setTailcatOnly(on: Boolean) = native.setTailcatOnly(on)
+
     /** Opens a local route to the computer. Nothing goes over the network until a client connects. */
     fun connect(link: TailPocketHostLink, derpMapUrl: String = ""): TailPocketConnection {
         val out = native.connect(link.encode(), derpMapUrl)
         failure(out)?.let { throw TailPocketException(it) }
         val obj = json.parseToJsonElement(out).jsonObject
-        return TailPocketConnection(native, obj.getValue("handle").jsonPrimitive.content.toLong(), obj.getValue("port").jsonPrimitive.content.toInt())
+        return TailPocketConnection(native, obj.getValue("handle").jsonPrimitive.content.toLong(), obj.getValue("port").jsonPrimitive.content.toInt(),
+            obj.getValue("token").jsonPrimitive.content, obj.getValue("base").jsonPrimitive.content)
     }
 
     /** Starts same-Wi-Fi pairing with a host at "ip:port" (see [TailPocketNearbyHosts.resolve]); returns the code to show. */

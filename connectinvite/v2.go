@@ -4,9 +4,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/jt-wang/tailpocket/internal/testhook"
 )
 
 // Version2 invites list every way to reach the host (Via) and carry what the end-to-end encrypted
@@ -161,7 +164,7 @@ func (r Route) validate(inInvite bool) error {
 			return ErrInvalid
 		}
 		for _, a := range r.A {
-			if h, p, err := net.SplitHostPort(a); err != nil || h == "" || p == "" || len(a) > 256 {
+			if !lanAddress(a) {
 				return ErrInvalid
 			}
 		}
@@ -205,7 +208,7 @@ func ValidRelayURL(s string) bool {
 
 // Proof labels for connectsecure.KeyProof, keyed with the host's Noise key on the host side.
 const (
-	// ProofNoise: a phone holds the Noise key it reports (sync, Tailcat pairing). Signed with that
+	// ProofNoise: a phone holds the Noise key it reports (sync). Signed with that
 	// Noise key; the message is NoiseClaim.
 	ProofNoise = "tailpocket2 noise"
 	// ProofPair: a phone pairing over relay or lan holds the nodekey it names. Signed with the
@@ -215,3 +218,26 @@ const (
 
 // NoiseClaim is what a ProofNoise proof covers: the phone's nodekey and its Noise public key.
 func NoiseClaim(phone, noise string) []byte { return []byte(phone + "\n" + noise) }
+
+// lanAddress: a literal IP and port on a local network: RFC 1918, CGNAT 100.64/10, IPv6 ULA fc00::/7
+// or IPv6 link-local. Loopback, IPv4 link-local (169.254/16, cloud metadata), public addresses and
+// names are refused, so an invite cannot make a phone dial services on itself or anywhere else.
+func lanAddress(a string) bool {
+	ap, err := netip.ParseAddrPort(a)
+	if err != nil || ap.Port() == 0 {
+		return false
+	}
+	ip := ap.Addr()
+	if ip.Is4In6() {
+		return false
+	}
+	if ip.IsLoopback() {
+		return testhook.LoopbackRoutes
+	}
+	if ip.Is4() {
+		return ip.IsPrivate() || cgnat.Contains(ip)
+	}
+	return ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+var cgnat = netip.MustParsePrefix("100.64.0.0/10")

@@ -82,21 +82,22 @@ func TestBadArgs(t *testing.T) {
 	dir := t.TempDir()
 	empty := filepath.Join(dir, "empty")
 	os.WriteFile(empty, []byte("\n"), 0o600)
+	tok := envWith("TAILPOCKET_RELAY_TOKEN", "made-up-token-for-test")
 	for name, args := range map[string][]string{
 		"missing token file":   {"--token-file", filepath.Join(dir, "nope")},
 		"empty token file":     {"--token-file", empty},
-		"cert without key":     {"--open", "--tls-cert", filepath.Join(dir, "c.pem")},
-		"key without cert":     {"--open", "--tls-key", filepath.Join(dir, "k.pem")},
-		"bad trust-proxy":      {"--open", "--trust-proxy", "not-a-cidr"},
-		"unknown flag":         {"--open", "--no-such-flag"},
-		"stray argument":       {"--open", "extra"},
-		"negative max-rooms":   {"--open", "--max-rooms", "-1"},
-		"zero phones per room": {"--open", "--max-phones-per-room", "0"},
-		"zero phone rate":      {"--open", "--phone-rate", "0"},
-		"zero max-conns":       {"--open", "--max-conns", "0"},
-		"public-host no name":  {"--open", "--public-host", ":443"},
+		"cert without key":     {"--tls-cert", filepath.Join(dir, "c.pem")},
+		"key without cert":     {"--tls-key", filepath.Join(dir, "k.pem")},
+		"bad trust-proxy":      {"--trust-proxy", "not-a-cidr"},
+		"unknown flag":         {"--no-such-flag"},
+		"stray argument":       {"extra"},
+		"negative max-rooms":   {"--max-rooms", "-1"},
+		"zero phones per room": {"--max-phones-per-room", "0"},
+		"zero phone rate":      {"--phone-rate", "0"},
+		"zero max-conns":       {"--max-conns", "0"},
+		"public-host no name":  {"--public-host", ":443"},
 	} {
-		if code, _, stderr := runQuick(t, args, noEnv); code != 2 {
+		if code, _, stderr := runQuick(t, args, tok); code != 2 {
 			t.Errorf("%s: exit %d, want 2; stderr:\n%s", name, code, stderr)
 		}
 	}
@@ -200,10 +201,16 @@ func TestStartsWithTokenFile(t *testing.T) {
 	}
 }
 
-func TestOpenWarns(t *testing.T) {
-	_, stderr, _ := start(t, []string{"--listen", "127.0.0.1:0", "--open"}, noEnv)
-	if !strings.Contains(strings.ToLower(stderr.String()), "warning") {
-		t.Fatalf("--open start has no warning:\n%s", stderr)
+// There is no --open: a relay anyone can register on is an anonymous relay for anyone.
+func TestOpenFlagRemoved(t *testing.T) {
+	for _, env := range []func(string) string{noEnv, envWith("TAILPOCKET_RELAY_TOKEN", "made-up-token-for-test")} {
+		code, _, stderr := runQuick(t, []string{"--listen", "127.0.0.1:0", "--public-host", testPublicHost, "--open"}, env)
+		if code != 2 || !strings.Contains(stderr, "-open") {
+			t.Fatalf("--open: exit %d, want 2 (unknown flag); stderr:\n%s", code, stderr)
+		}
+	}
+	if _, _, stderr := runQuick(t, []string{"--help"}, noEnv); strings.Contains(stderr, "-open") {
+		t.Fatalf("--help still lists --open:\n%s", stderr)
 	}
 }
 
@@ -233,7 +240,7 @@ func writeCert(t *testing.T, dir string) (certFile, keyFile string) {
 
 func TestTLS(t *testing.T) {
 	c, k := writeCert(t, t.TempDir())
-	addr, stderr, _ := start(t, []string{"--listen", "127.0.0.1:0", "--open", "--tls-cert", c, "--tls-key", k}, noEnv)
+	addr, stderr, _ := start(t, []string{"--listen", "127.0.0.1:0", "--tls-cert", c, "--tls-key", k}, envWith("TAILPOCKET_RELAY_TOKEN", "made-up-token-for-test"))
 	cl := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
 	resp, err := cl.Get("https://" + addr + "/healthz")
 	if err != nil {
@@ -254,7 +261,7 @@ func TestIdleConnectionClosed(t *testing.T) {
 	old := idleTimeout
 	idleTimeout = 300 * time.Millisecond
 	defer func() { idleTimeout = old }()
-	addr, _, _ := start(t, []string{"--listen", "127.0.0.1:0", "--open"}, noEnv)
+	addr, _, _ := start(t, []string{"--listen", "127.0.0.1:0"}, envWith("TAILPOCKET_RELAY_TOKEN", "made-up-token-for-test"))
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -352,7 +359,7 @@ func TestTLSReloadsRenewedCertificate(t *testing.T) {
 	dir := t.TempDir()
 	c, k := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
 	writeCertSerial(t, c, k, 1)
-	addr, _, _ := start(t, []string{"--listen", "127.0.0.1:0", "--open", "--tls-cert", c, "--tls-key", k}, noEnv)
+	addr, _, _ := start(t, []string{"--listen", "127.0.0.1:0", "--tls-cert", c, "--tls-key", k}, envWith("TAILPOCKET_RELAY_TOKEN", "made-up-token-for-test"))
 	serial := func() int64 {
 		conn, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true})
 		if err != nil {
@@ -493,10 +500,6 @@ func TestPublicHostRequired(t *testing.T) {
 	if !strings.Contains(stderr, "--public-host") || !strings.Contains(stderr, "relay.example.com") {
 		t.Fatalf("no --public-host: stderr does not say what to pass:\n%s", stderr)
 	}
-	code, _, stderr = runQuick(t, []string{"--listen", "127.0.0.1:0", "--open"}, noEnv)
-	if code != 2 {
-		t.Fatalf("--open, no --public-host: exit %d, want 2; stderr:\n%s", code, stderr)
-	}
 }
 
 func TestHelpSaysPublicHostRequired(t *testing.T) {
@@ -511,7 +514,7 @@ func TestHelpSaysPublicHostRequired(t *testing.T) {
 }
 
 func TestMaxConnsFlag(t *testing.T) {
-	addr, _, _ := start(t, []string{"--listen", "127.0.0.1:0", "--open", "--max-conns", "2"}, noEnv)
+	addr, _, _ := start(t, []string{"--listen", "127.0.0.1:0", "--max-conns", "2"}, envWith("TAILPOCKET_RELAY_TOKEN", "made-up-token-for-test"))
 	for i := 0; i < 2; i++ {
 		c, err := net.Dial("tcp", addr)
 		if err != nil {
@@ -534,11 +537,11 @@ const roomsWarning = "connections; raise --max-conns"
 const filesWarning = "open files"
 
 func TestWarnsWhenRoomsDoNotFit(t *testing.T) {
-	_, stderr, _ := start(t, []string{"--listen", "127.0.0.1:0", "--open", "--max-rooms", "200"}, noEnv)
+	_, stderr, _ := start(t, []string{"--listen", "127.0.0.1:0", "--max-rooms", "200"}, envWith("TAILPOCKET_RELAY_TOKEN", "made-up-token-for-test"))
 	if !strings.Contains(stderr.String(), roomsWarning) {
 		t.Fatalf("--max-rooms 200 with --max-conns 4096: no warning:\n%s", stderr)
 	}
-	_, stderr, _ = start(t, []string{"--listen", "127.0.0.1:0", "--open"}, noEnv)
+	_, stderr, _ = start(t, []string{"--listen", "127.0.0.1:0"}, envWith("TAILPOCKET_RELAY_TOKEN", "made-up-token-for-test"))
 	if strings.Contains(stderr.String(), roomsWarning) {
 		t.Fatalf("defaults warn that rooms do not fit:\n%s", stderr)
 	}
@@ -548,12 +551,12 @@ func TestWarnsWhenFileLimitLow(t *testing.T) {
 	old := fileLimit
 	defer func() { fileLimit = old }()
 	fileLimit = func() (uint64, bool) { return 256, true }
-	_, stderr, _ := start(t, []string{"--listen", "127.0.0.1:0", "--open"}, noEnv)
+	_, stderr, _ := start(t, []string{"--listen", "127.0.0.1:0"}, envWith("TAILPOCKET_RELAY_TOKEN", "made-up-token-for-test"))
 	if !strings.Contains(stderr.String(), filesWarning) {
 		t.Fatalf("open-file limit 256 under --max-conns 4096: no warning:\n%s", stderr)
 	}
 	fileLimit = func() (uint64, bool) { return 1 << 20, true }
-	_, stderr, _ = start(t, []string{"--listen", "127.0.0.1:0", "--open"}, noEnv)
+	_, stderr, _ = start(t, []string{"--listen", "127.0.0.1:0"}, envWith("TAILPOCKET_RELAY_TOKEN", "made-up-token-for-test"))
 	if strings.Contains(stderr.String(), filesWarning) {
 		t.Fatalf("a high open-file limit warns:\n%s", stderr)
 	}

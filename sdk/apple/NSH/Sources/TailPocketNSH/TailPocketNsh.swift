@@ -4,7 +4,7 @@ import TailPocketUI
 import UIKit
 
 /// Registers every bridge function on an NshAppView, so the NSH app calls them with
-/// `host.call('tailPocket.pair', {...})` (see sdk/js/nsh.ts) and receives `tailPocket.nearby` events.
+/// `host.call('tailPocket.pair', {...})` (see sdk/js/nsh.ts) and receives `tailPocket.nearby` and `tailPocket.pair.emoji` events.
 ///
 ///     TailPocketNsh.attach(view)
 @MainActor

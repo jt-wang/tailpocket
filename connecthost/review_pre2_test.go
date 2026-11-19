@@ -34,7 +34,7 @@ func TestReviewTailcatPairingTakesAnyNodekey(t *testing.T) {
 	victim := key.NewNode()
 	victimID := victim.Public().String()
 
-	p, err := h.Pair(context.Background(), PairOptions{})
+	p, err := h.Pair(context.Background(), PairOptions{Confirm: confirmAll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestReviewTailcatPairingTakesAnyNodekey(t *testing.T) {
 
 	// The real phone: a nodekey that is paired but has no Noise key cannot pair over relay or lan (as
 	// in v1, C8). Its owner pairs over Tailcat and syncs on the main node, and then has lan.
-	p2, err := h.Pair(context.Background(), PairOptions{})
+	p2, err := h.Pair(context.Background(), PairOptions{Confirm: confirmAll})
 	if err != nil {
 		t.Fatal(err)
 	}

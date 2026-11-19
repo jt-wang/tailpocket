@@ -38,7 +38,7 @@ final class BridgeTests: XCTestCase {
 
     func testNamesMatchTheContract() {
         XCTAssertEqual(Set(makeBridge().functions.keys), Set(TailPocketBridge.names))
-        XCTAssertEqual(TailPocketBridge.names.count, 21)
+        XCTAssertEqual(TailPocketBridge.names.count, 22)
     }
 
     func testKeysInviteTextAndErrors() async throws {
@@ -87,6 +87,38 @@ final class BridgeTests: XCTestCase {
         _ = try await bridge.call("tailPocket.store.deleteLink", nil)
         let gone = try await bridge.call("tailPocket.store.link", nil)
         XCTAssertNil(gone)
+    }
+
+    // tailPocket.setTailcatOnly reaches the Go side: a lan-only v2 invite then has no route, and no emoji event goes out.
+    func testSetTailcatOnly() async throws {
+        let events = Events()
+        let bridge = makeBridge(events: events)
+        _ = try await bridge.call("tailPocket.setTailcatOnly", ["on": true])
+        defer { TailPocket.setTailcatOnly(false) }
+        let invite: [String: Any] = ["v": 2, "name": "Mac", "exp": 1 << 40, "pk": String(repeating: "A", count: 43), "psk": String(repeating: "A", count: 22),
+                                     "via": [["t": "lan", "a": ["192.168.1.20:7681"]]]]
+        let key = try await bridge.call("tailPocket.newKey", nil) as? String
+        do {
+            _ = try await bridge.call("tailPocket.pair", ["invite": invite, "phoneKey": key ?? "", "device": "test", "timeoutMs": 5000])
+            XCTFail("paired")
+        } catch {
+            XCTAssertEqual((error as? TailPocketError)?.code, "unreachable")
+        }
+        XCTAssertFalse(events.items.contains { $0.0 == "tailPocket.pair.emoji" })
+        _ = try await bridge.call("tailPocket.setTailcatOnly", ["on": false])
+    }
+
+    // The bridge hands JavaScript the forward's token and a baseUrl under its prefix.
+    func testConnectReturnsTheTokenAndItsBaseUrl() async throws {
+        let bridge = makeBridge()
+        let link: [String: Any] = ["name": "Mac", "key": TailPocket.newKey(), "pk": String(repeating: "A", count: 43),
+                                   "via": [["t": "relay", "u": "wss://relay.example.com", "r": "AAAAAAAAAAAAAAAAAAAAAA"]]]
+        let opened = try await bridge.call("tailPocket.connect", ["link": link]) as? [String: Any]
+        let token = try XCTUnwrap(opened?["token"] as? String)
+        let port = try XCTUnwrap(opened?["port"] as? Int)
+        XCTAssertFalse(token.isEmpty)
+        XCTAssertEqual(opened?["baseUrl"] as? String, "http://127.0.0.1:\(port)/_tailpocket/\(token)")
+        _ = try await bridge.call("tailPocket.disconnect", ["handle": opened?["handle"] as Any])
     }
 
     func testConnectReturnsALocalURL() async throws {

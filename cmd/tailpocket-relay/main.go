@@ -37,15 +37,16 @@ var fileLimit = openFileLimit
 // minToken is the shortest token accepted, in bytes.
 const minToken = 16
 
+// maxHeaderBytes bounds a request's headers; the relay's own requests need well under 1 KiB.
+const maxHeaderBytes = 8 << 10
+
 const tokenHelp = `tailpocket-relay needs a token so only your computer can register.
 Make one and pass it as a file or an environment variable:
 
   openssl rand -base64 32 > relay.token && chmod 600 relay.token
   tailpocket-relay --token-file relay.token --public-host relay.example.com
 
-  TAILPOCKET_RELAY_TOKEN="$(openssl rand -base64 32)" tailpocket-relay --public-host relay.example.com
-
-Or start with --open to let anyone register a room (not recommended).`
+  TAILPOCKET_RELAY_TOKEN="$(openssl rand -base64 32)" tailpocket-relay --public-host relay.example.com`
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -80,7 +81,6 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	var (
 		listen     = fs.String("listen", "127.0.0.1:8080", "address to listen on")
 		tokenFile  = fs.String("token-file", "", "file holding the relay token (one line); or set TAILPOCKET_RELAY_TOKEN")
-		open       = fs.Bool("open", false, "let anyone register a room, without a token")
 		tlsCert    = fs.String("tls-cert", "", "TLS certificate file; with --tls-key, serve wss:// directly")
 		tlsKey     = fs.String("tls-key", "", "TLS key file")
 		maxRooms   = fs.Int("max-rooms", connectrelay.DefaultMaxRooms, "most hosts registered at once")
@@ -133,7 +133,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	case getenv("TAILPOCKET_RELAY_TOKEN") != "":
 		token = strings.TrimSpace(getenv("TAILPOCKET_RELAY_TOKEN"))
 	}
-	if token == "" && !*open {
+	if token == "" {
 		fmt.Fprintln(stderr, tokenHelp)
 		return 2
 	}
@@ -150,7 +150,6 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 
 	srv, err := connectrelay.NewServer(connectrelay.Config{
 		Token:            token,
-		Open:             *open,
 		MaxRooms:         *maxRooms,
 		MaxPhonesPerRoom: *maxPhones,
 		PhoneRate:        *phoneRate,
@@ -182,6 +181,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	hs := &http.Server{
 		Handler:           srv,
 		ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes:    maxHeaderBytes,
+		// Else net/http answers OPTIONS * itself; the relay refuses it with everything not origin-form.
+		DisableGeneralOptionsHandler: true,
 		// Upgraded WebSocket connections are hijacked and not affected.
 		IdleTimeout: idleTimeout,
 		ErrorLog:    log.New(io.Discard, "", 0),
@@ -193,9 +195,6 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 			return fail("TLS certificate: %v", err)
 		}
 		hs.TLSConfig = &tls.Config{GetCertificate: certs.get}
-	}
-	if *open {
-		fmt.Fprintln(stderr, "tailpocket-relay: WARNING: --open: anyone who can reach this relay can register a room")
 	}
 	scheme := "ws"
 	if *tlsCert != "" {

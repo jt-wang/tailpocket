@@ -13,12 +13,18 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-// Construction (both roles derive the same values; phonePub ‖ hostPub order is fixed by role):
+// Construction, wire v2 (both roles derive the same values; phonePub ‖ hostPub order is fixed by role):
 //
+//	commit = SHA256(label ‖ "commit" ‖ phonePub ‖ nonce)        sent by the phone before it sees hostPub
 //	shared = X25519(own private, peer public)
-//	code   = "%06d" of uint64_be(SHA256(label ‖ phonePub ‖ hostPub ‖ shared)[0:8]) mod 1_000_000
-//	key    = HKDF-SHA256(ikm = shared, salt = phonePub ‖ hostPub, info = label ‖ " invitation", 32 bytes)
-//	sealed = nonce(12) ‖ ChaCha20-Poly1305(key, nonce, plaintext) ‖ tag(16)
+//	code   = "%06d" of uint64_be(SHA256(label ‖ "code" ‖ commit ‖ phonePub ‖ hostPub ‖ nonce ‖ shared)[0:8]) mod 1_000_000
+//	key    = HKDF-SHA256(ikm = shared, salt = commit ‖ phonePub ‖ hostPub ‖ nonce, info = label ‖ " invitation", 32 bytes)
+//	sealed = aeadNonce(12) ‖ ChaCha20-Poly1305(key, aeadNonce, plaintext) ‖ tag(16)
+//
+// nonce is the phone's 32 random bytes, revealed with phonePub only after the host sent hostPub.
+
+// NonceSize is the size of the phone's commitment nonce.
+const NonceSize = 32
 
 type KeyPair struct{ Private, Public [32]byte }
 
@@ -44,18 +50,44 @@ func KeyPairFromPrivate(private []byte) (KeyPair, error) {
 	return kp, nil
 }
 
+// NewNonce returns a fresh commitment nonce.
+func NewNonce() ([]byte, error) {
+	nonce := make([]byte, NonceSize)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return nonce, nil
+}
+
+// Commit is the phone's commitment to its key: SHA256(label ‖ "commit" ‖ phonePub ‖ nonce).
+func Commit(label string, phonePub, nonce []byte) [32]byte {
+	d := sha256.New()
+	d.Write([]byte(label))
+	d.Write([]byte("commit"))
+	d.Write(phonePub)
+	d.Write(nonce)
+	var c [32]byte
+	copy(c[:], d.Sum(nil))
+	return c
+}
+
 // Session is one side's view of a pairing exchange.
 type Session struct {
 	Code string
 	key  []byte
 }
 
-func NewSession(label string, own KeyPair, peerPublic []byte, phone bool) (*Session, error) {
+// NewSession derives code and key once both keys and the phone's nonce are known. The host must
+// first check that Commit(label, phonePub, nonce) equals the commitment the phone sent.
+func NewSession(label string, own KeyPair, peerPublic []byte, phone bool, nonce []byte) (*Session, error) {
 	if label == "" {
 		return nil, errors.New("label is empty")
 	}
 	if len(peerPublic) != curve25519.PointSize {
 		return nil, errors.New("peer key must be 32 bytes")
+	}
+	if len(nonce) != NonceSize {
+		return nil, errors.New("nonce must be 32 bytes")
 	}
 	shared, err := curve25519.X25519(own.Private[:], peerPublic) // rejects low-order points
 	if err != nil {
@@ -65,13 +97,18 @@ func NewSession(label string, own KeyPair, peerPublic []byte, phone bool) (*Sess
 	if !phone {
 		phonePub, hostPub = peerPublic, own.Public[:]
 	}
+	commit := Commit(label, phonePub, nonce)
 	digest := sha256.New()
 	digest.Write([]byte(label))
+	digest.Write([]byte("code"))
+	digest.Write(commit[:])
 	digest.Write(phonePub)
 	digest.Write(hostPub)
+	digest.Write(nonce)
 	digest.Write(shared)
 	code := fmt.Sprintf("%06d", binary.BigEndian.Uint64(digest.Sum(nil)[:8])%1_000_000)
-	salt := append(append([]byte{}, phonePub...), hostPub...)
+	salt := make([]byte, 0, 4*32)
+	salt = append(append(append(append(salt, commit[:]...), phonePub...), hostPub...), nonce...)
 	key := make([]byte, chacha20poly1305.KeySize)
 	if _, err := io.ReadFull(hkdf.New(sha256.New, shared, salt, []byte(label+" invitation")), key); err != nil {
 		return nil, err

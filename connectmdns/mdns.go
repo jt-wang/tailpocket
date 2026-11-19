@@ -73,6 +73,11 @@ func (s Service) validate() error {
 	if s.Instance == "" || len(s.Instance) > 63 || !utf8.ValidString(s.Instance) || strings.ContainsAny(s.Instance, ".\\") {
 		return errors.New("connectmdns: instance must be 1–63 bytes without dots")
 	}
+	// avahi-publish-service gets the instance as an argument of its own: one starting with "-"
+	// would be read as an option.
+	if strings.HasPrefix(s.Instance, "-") {
+		return errors.New("connectmdns: instance must not start with '-'")
+	}
 	for _, r := range s.Instance {
 		if unicode.IsControl(r) {
 			return errors.New("connectmdns: instance has control characters")
@@ -97,7 +102,7 @@ func CleanInstance(name string) string {
 		}
 		return r
 	}, name)
-	name = strings.Join(strings.Fields(name), " ")
+	name = strings.TrimLeft(strings.Join(strings.Fields(name), " "), "- ")
 	for len(name) > 63 {
 		_, size := utf8.DecodeLastRuneInString(name)
 		name = name[:len(name)-size]

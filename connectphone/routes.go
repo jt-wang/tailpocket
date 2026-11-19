@@ -150,6 +150,9 @@ func (s *Session) attemptsLocked() []connectinvite.Route {
 		all = append(all, connectinvite.Route{T: connectinvite.RouteTailcat})
 	}
 	for _, r := range s.link.Via {
+		if s.opts.TailcatOnly {
+			break // the phone's preference: the routes the host lists stay unused
+		}
 		switch {
 		case r.T == connectinvite.RouteRelay && r.M == connectinvite.ModeOpaque:
 		case (r.T == connectinvite.RouteRelay || r.T == connectinvite.RouteLAN) && s.link.HostKey != "":
@@ -306,6 +309,9 @@ func (s *Session) watch(sess *connectsecure.Session) {
 			}
 			s.mu.Lock()
 			s.link.setRoutes(via)
+			if s.opts.TailcatOnly {
+				s.link.Via = nil
+			}
 			s.setClientLocked()
 			link := s.link
 			s.mu.Unlock()
@@ -453,8 +459,11 @@ func relayName(code string) string {
 // is also how a phone learns routes the host added. A host older than v0.3 does not answer.
 func (s *Session) Sync(ctx context.Context) (Link, error) {
 	s.mu.Lock()
-	client := s.client
+	client, link := s.client, s.link
 	s.mu.Unlock()
+	if s.opts.TailcatOnly {
+		return link, nil // nothing to register: the phone uses no route the key is for
+	}
 	if client == nil {
 		return Link{}, errors.New("connectphone: this link has no Tailcat route")
 	}
@@ -513,7 +522,7 @@ func (s *Session) Sync(ctx context.Context) (Link, error) {
 	s.mu.Lock()
 	s.link.HostKey = r.PK
 	s.link.setRoutes(r.Via)
-	link := s.link
+	link = s.link
 	s.mu.Unlock()
 	if s.opts.OnLink != nil {
 		s.opts.OnLink(link)
@@ -534,11 +543,25 @@ func PairV2(ctx context.Context, inv connectinvite.V2, phoneKey string, opts Opt
 	if inv.Expired(time.Now()) {
 		return Link{}, ErrExpired
 	}
+	if inv.PK == "" {
+		// A v1 code read as v2 (one Tailcat route, no Noise key): pair the v1 way, as v0.2 did. A host
+		// that wants the emoji check hands out v2 codes, which always name its key.
+		for _, r := range inv.Via {
+			if r.T == connectinvite.RouteTailcat && r.Inv != nil {
+				return Pair(ctx, *r.Inv, phoneKey, opts)
+			}
+		}
+		return Link{}, fmt.Errorf("%w: no route to pair over", ErrUnreachable)
+	}
+	if opts.OnSAS == nil {
+		return Link{}, ErrNoSAS
+	}
 	ctx, cancel := context.WithDeadline(ctx, time.Unix(inv.ExpiresAt, 0))
 	defer cancel()
 	var list []connectinvite.Route
 	for _, r := range inv.Via {
-		if r.T == connectinvite.RouteTailcat || r.T == connectinvite.RouteLAN || (r.T == connectinvite.RouteRelay && r.M != connectinvite.ModeOpaque) {
+		tailcatOK := r.T == connectinvite.RouteTailcat && r.Inv != nil && r.Inv.Validate() == nil
+		if tailcatOK || (!opts.TailcatOnly && (r.T == connectinvite.RouteLAN || (r.T == connectinvite.RouteRelay && r.M != connectinvite.ModeOpaque))) {
 			list = append(list, r)
 		}
 	}
@@ -551,14 +574,9 @@ func PairV2(ctx context.Context, inv connectinvite.V2, phoneKey string, opts Opt
 		if i < len(list)-1 {
 			actx, acancel = context.WithTimeout(ctx, 30*time.Second)
 		}
-		var l Link
-		if r.T == connectinvite.RouteTailcat {
-			if l, err = Pair(actx, *r.Inv, phoneKey, opts); err == nil {
-				l = syncAfterPair(ctx, l, opts)
-			}
-		} else {
-			l, err = pairSecure(actx, inv, r, private, phoneKey, opts)
-		}
+		// Every route runs the same Noise pairing, Tailcat's inside the window's one-time node, so
+		// every route shows the emoji and proves the nodekey.
+		l, err := pairSecure(actx, inv, r, private, phoneKey, opts)
 		acancel()
 		if err == nil {
 			return l, nil
@@ -577,33 +595,25 @@ func PairV2(ctx context.Context, inv connectinvite.V2, phoneKey string, opts Opt
 	return Link{}, fmt.Errorf("%w: %v", ErrUnreachable, errors.Join(errs...))
 }
 
-// syncAfterPair registers the Noise key of a phone that just paired over Tailcat, on the main node,
-// and returns the link with the host's key and routes. If that fails the Tailcat link still works,
-// and a later Sync adds the rest.
-func syncAfterPair(ctx context.Context, l Link, opts Options) Link {
-	s, err := Connect(l, opts)
-	if err != nil {
-		return l
-	}
-	defer s.Close()
-	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	if synced, err := s.Sync(sctx); err == nil {
-		return synced
-	}
-	return l
-}
-
 // pairSecure pairs over one encrypted route: Noise IKpsk2 with the code's psk, then the host's paired
 // message and its routes. It tries again while the route is up but the host is busy.
 func pairSecure(ctx context.Context, inv connectinvite.V2, r connectinvite.Route, private key.NodePrivate, phoneKey string, opts Options) (Link, error) {
 	server, _ := decodeKey(inv.PK)
 	cfg := connectsecure.ClientConfig{Static: noiseKeys(private), Server: server, Version: Version,
 		Pair:   &connectsecure.PairHello{CID: connectsecure.CIDFor(inv.PSK), PSK: connectsecure.PSKFor(inv.PSK)},
-		Device: connectinvite.CleanName(opts.Device), Phone: private.Public().String(), Prove: nodekeyProof(private, server)}
+		Device: connectinvite.CleanName(opts.Device), Phone: private.Public().String(), Prove: nodekeyProof(private, server),
+		OnSAS: opts.OnSAS}
+	shown := false
+	show := cfg.OnSAS
+	cfg.OnSAS = func(e []string) { shown = true; show(e) }
 	for {
 		l, err := pairOnce(ctx, r, cfg, inv, phoneKey, opts)
-		if err == nil || errors.Is(err, ErrUnauthorized) {
+		// Once the emoji were up, the computer's user decided (or the connection broke and the
+		// computer ended the window): trying again would only show a stranger's.
+		if err == nil || errors.Is(err, ErrUnauthorized) || shown {
+			if err != nil && shown && !errors.Is(err, ErrUnauthorized) {
+				err = fmt.Errorf("%w: %v", ErrUnauthorized, err)
+			}
 			return l, err
 		}
 		select {
@@ -615,7 +625,19 @@ func pairSecure(ctx context.Context, inv connectinvite.V2, r connectinvite.Route
 }
 
 func pairOnce(ctx context.Context, r connectinvite.Route, cfg connectsecure.ClientConfig, inv connectinvite.V2, phoneKey string, opts Options) (Link, error) {
-	raw, err := dialRaw(ctx, r, opts.HTTPClient)
+	var raw net.Conn
+	var err error
+	if r.T == connectinvite.RouteTailcat {
+		var oneTime key.NodePrivate
+		if oneTime.UnmarshalText([]byte(r.Inv.Key)) != nil {
+			return Link{}, errors.New("connectphone: invalid invite")
+		}
+		client := &tailcat.Client{Server: tailcat.Addr(r.Inv.Address), Key: oneTime, Logf: func(string, ...any) {}, DERPMapURL: opts.DERPMapURL}
+		defer client.Close()
+		raw, err = client.DialTCPPort(ctx, uint16(r.Inv.Port))
+	} else {
+		raw, err = dialRaw(ctx, r, opts.HTTPClient)
+	}
 	if err != nil {
 		return Link{}, err
 	}
@@ -653,7 +675,10 @@ func pairOnce(ctx context.Context, r connectinvite.Route, cfg connectsecure.Clie
 				return Link{}, errors.New("connectphone: invalid host reply")
 			}
 			l.setRoutes(via)
-			if len(l.Via) == 0 && l.Address == "" {
+			if opts.TailcatOnly {
+				l.Via = nil
+			}
+			if len(l.Via) == 0 && l.Address == "" && r.T != connectinvite.RouteTailcat {
 				l.Via = []connectinvite.Route{r}
 			}
 			return l, l.validate()

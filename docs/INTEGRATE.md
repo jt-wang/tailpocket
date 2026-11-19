@@ -43,7 +43,8 @@ at once, so send anything the phone should hear (such as "you were removed") bef
 
 Check: run your app, open a pairing window, and pair with the CLI phone:
 `tailpocket-phone-<os>-<arch> pair -key phone.key -out link.json -` with the QR text on stdin, then
-`connect -link link.json` and request your server through the printed `127.0.0.1` port.
+`connect -link link.json` and request your server through the printed `127.0.0.1` port. From
+v0.3.0-pre.4 it prints a `base` URL with a token in its path: request under it (`curl <base>/`).
 
 ## 2. The phone side
 
@@ -96,3 +97,92 @@ real host.
 3. Restart the computer side with the saved state: the phone still connects.
 4. Pair over the same Wi-Fi: both screens show the same 6-digit code.
 5. Revoke the phone on the computer: its next connection fails.
+
+## 4. v0.3 (pre-release)
+
+The packages above are v0.2.4. To try v0.3, take them from the newest `v0.3.0-pre.*` release under
+[releases](https://github.com/jt-wang/tailpocket/releases) instead; everything in sections 1 to 3
+still applies, with these changes.
+
+### Defaults: nothing to configure
+
+With no new settings, a v0.3 computer is reachable over Tailcat (tailcat.dev, as in v0.2) and, on
+the same Wi-Fi, over the local network: it listens on its private addresses only (RFC 1918, CGNAT,
+IPv6 ULA and link-local, at most 4), on a port derived from its key, follows address changes, and
+accepts nothing there but a Noise handshake (a paired phone, or a phone pairing in an open window). No relay runs unless you add one.
+
+- `noLan: true` (Go `Config.NoLAN`): no local network listener.
+- `tailcatOnly: true` (Go `Config.TailcatOnly`): Tailcat only, as before v0.3. No local network
+  listener, no relay connection, and v2 invites and routes list Tailcat alone. It cannot be combined
+  with `relays` or `listen` (the helper fails with `invalid-config`). Pairings and phones from v0.2
+  work as before.
+- On the phone, `setTailcatOnly(true)` (Swift `TailPocket.setTailcatOnly`, Kotlin
+  `TailPocket.setTailcatOnly`, JS/NSH/React Native `tailPocket.setTailcatOnly`, Go
+  `connectphone.Options.TailcatOnly`) makes the phone ignore every relay and local network route an
+  invite or a computer lists. Offer both switches to users who want Tailcat only.
+
+### State: save `keys`
+
+The state to save gains `keys`, each phone's end-to-end key. Pass it back (`keys` in the helper
+config, Go `Config.Keys`). A computer started without it still accepts its phones over Tailcat and
+never tells them they are unpaired; a phone's `sync` registers its key again.
+
+### Pairing: compare emoji on the computer
+
+Open the window with `pair({ttl, payload, emoji: true})` (Go: `PairOptions.Confirm`) and show
+`pairing.qr2` (Go: `p.QR2(prefix)`). The phone pairs over the first route it reaches. Before
+anything is saved, both screens show the same four emoji, derived from the Noise handshake on every
+route, Tailcat included:
+
+- Computer: a `request` event `{phone, device, route, emoji}` (Go: `Confirm(ctx, PairRequest)`).
+  Show `device` and the emoji and ask the user whether the phone shows the same; answer with
+  `confirm(true)` or `confirm(false)` within 55 s. No answer, a no, or the phone leaving ends the
+  window, and its invite pairs nobody after that. With no `request` listener the phone is refused.
+- Phone: `onEmoji` (Swift and Kotlin: required; JS: `pair(invite, {onEmoji})`) shows them. The user
+  confirms on the computer only.
+
+A window without `emoji` hands out only the v1 `qr` (Tailcat, as in v0.2). Same-Wi-Fi pairing
+without a camera (`pairing.local`) still shows a 6-digit code on both screens; from v0.3.0-pre.4 its
+wire protocol is version 2 (the phone commits to its key before it sees the computer's), so phone
+and computer must both be pre.4 or later.
+
+### Relays (optional)
+
+Run your own `tailpocket-relay` (`cmd/tailpocket-relay`; it always needs a token) and list it in
+`relays: [{url, token}]`. The relay passes only Noise ciphertext between a phone and the computer.
+
+An opaque relay (`opaque: true`) skips TailPocket's Noise layer for apps that encrypt end to end
+themselves. Anyone who knows the room reaches your app's port through it, so:
+
+- You MUST set `appAuth: true` (Go `Relay.AppAuth`) on an opaque relay, and only when your app
+  authenticates every connection itself (TLS with a pinned key and a per-device credential, for
+  example). Without it the computer side refuses to start.
+- An opaque connection has no phone identity: `PhoneOf` is "", the `identifyPhone` line and the
+  `authorize` event say `opaque`. Revoking or disconnecting any phone closes every open opaque
+  connection; your own credential check decides each new one.
+
+### The phone's local forward (MUST)
+
+`connect` opens a port on `127.0.0.1` that reaches the computer as this phone.
+Any program on the phone can connect to a loopback port, so the forward lets nothing through without
+the connection's token, and your app MUST follow these rules:
+
+- Build every HTTP and WebSocket URL by appending to `baseUrl` (`baseURL` in Swift), which is
+  `http://127.0.0.1:<port>/_tailpocket/<token>`: `"$baseUrl/api/info"`, `` `${baseUrl}/api/info` ``,
+  `baseURL.appendingPathComponent("api/info")`. The forward removes the prefix, so your server sees
+  `/api/info`. A URL resolved against "/" (`new URL("/api/info", baseUrl)`, `URL(string: "/api/info",
+  relativeTo: baseURL)`, OkHttp's `resolve("/api/info")`) drops the prefix and gets 403. A client that
+  cannot keep the prefix sends the header `Tailpocket-Token: <token>` on every request instead.
+- A client of another protocol (your own TLS, for example) MUST start each connection with the line
+  `TP-FWD <token>\n`; the forward removes it and then carries the bytes as they are. Without it, or
+  with a wrong token, the connection is closed and the computer is never dialed.
+- Keep the token (`token` on the connection) in memory only: never store, log or send it anywhere. A
+  new `connect` gets a new token.
+
+### Compatibility
+
+- Phones on v0.2 keep using Tailcat with a v0.3 computer; nothing to pair again.
+- A v0.3.0-pre.3 phone still connects to a pre.4 computer over every route, but pairs with it only
+  through a v1 window. Pairing over a v2 invite needs pre.4 on both sides.
+- A phone app moving to pre.4 MUST take its URLs from `baseUrl` (see above); code that builds
+  `http://127.0.0.1:<port>` from the port gets 403.

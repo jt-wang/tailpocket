@@ -17,7 +17,7 @@ class BridgeTest {
             pairedWith = key
             return """{"address":"tcM","port":48931,"name":"Mac","payload":"t","key":"$key"}"""
         }
-        override fun connect(link: String, derp: String) = """{"handle":4,"port":5555}"""
+        override fun connect(link: String, derp: String) = """{"handle":4,"port":5555,"token":"TOK","base":"/_tailpocket/TOK"}"""
         var stopped = -1L
         override fun stop(handle: Long) { stopped = handle }
         override fun localPairStart(op: Long, address: String, label: String, device: String) = """{"code":"123456"}"""
@@ -27,10 +27,16 @@ class BridgeTest {
         override fun decodeInvite2(text: String, prefix: String) = if (text.startsWith(prefix) || text.startsWith("tailpocket1:"))
             """{"v":2,"name":"Mac","exp":9,"via":[{"t":"relay","u":"wss://relay.example.com","r":"AAAAAAAAAAAAAAAAAAAAAA","m":"opaque"}]}""" else """{"error":"invalid-invite"}"""
         var paired2 = ""
+        /** Pair as a v0.3.0-pre.4 computer: the emoji first, the link from pair2Finish. */
+        var withEmoji = false
         override fun pair2(op: Long, invite: String, key: String, device: String, derp: String, timeoutMs: Long): String {
             paired2 = invite
+            if (withEmoji) return """{"emoji":["🐶","🌙","🍕","🔑"]}"""
             return """{"name":"Mac","payload":"t","key":"$key","pk":"PK","via":[{"t":"relay","u":"wss://relay.example.com","r":"R"}]}"""
         }
+        override fun pair2Finish(op: Long, timeoutMs: Long) = """{"name":"Mac","payload":"t","key":"privkey:stored","pk":"PK2"}"""
+        var tailcatOnly: Boolean? = null
+        override fun setTailcatOnly(on: Boolean) { tailcatOnly = on }
         override fun sync(handle: Long, timeoutMs: Long) = """{"address":"tcM","port":48931,"name":"Mac","key":"privkey:1","pk":"PK","via":[{"t":"relay","u":"wss://relay.example.com","r":"R"}]}"""
         override fun link(handle: Long) = sync(handle, 0)
         override fun path(handle: Long, timeoutMs: Long) = if (handle == 4L) """{"route":"relay","relay":"relay.example.com"}""" else """{"error":"revoked"}"""
@@ -84,10 +90,27 @@ class BridgeTest {
         try { call("tailPocket.sync", mapOf("handle" to 99)); fail() } catch (e: TailPocketException) { assertEquals("unknown-handle", e.code) }
     }
 
+    // The emoji reach JavaScript as an event while the pairing waits for the computer's answer.
+    @Test fun pairEmitsTheEmojiThenReturnsTheLink() = runTest {
+        native.withEmoji = true
+        @Suppress("UNCHECKED_CAST")
+        val link = call("tailPocket.pair", mapOf("invite" to "tailpocket2:x", "device" to "Pixel")) as Map<String, Any?>
+        assertEquals("PK2", link["pk"])
+        assertEquals(listOf("tailPocket.pair.emoji" to mapOf("emoji" to listOf("🐶", "🌙", "🍕", "🔑"))), events)
+    }
+
+    @Test fun setTailcatOnly() = runTest {
+        call("tailPocket.setTailcatOnly", mapOf("on" to true))
+        assertEquals(true, native.tailcatOnly)
+        call("tailPocket.setTailcatOnly", mapOf("on" to false))
+        assertEquals(false, native.tailcatOnly)
+    }
+
     @Test fun connectAndDisconnect() = runTest {
         @Suppress("UNCHECKED_CAST")
         val c = call("tailPocket.connect", mapOf("link" to mapOf("address" to "tcM", "port" to 48931, "name" to "Mac", "key" to "privkey:1"))) as Map<String, Any?>
-        assertEquals("http://127.0.0.1:5555", c["baseUrl"])
+        assertEquals("http://127.0.0.1:5555/_tailpocket/TOK", c["baseUrl"])
+        assertEquals("TOK", c["token"])
         call("tailPocket.disconnect", mapOf("handle" to c["handle"]))
         assertEquals(4L, native.stopped)
     }

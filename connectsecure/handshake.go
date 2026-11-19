@@ -26,6 +26,7 @@ type helloMsg struct {
 	Device  string `json:"device,omitempty"`
 	Phone   string `json:"phone,omitempty"`
 	Proof   string `json:"proof,omitempty"` // base64url; ClientConfig.Prove
+	SAS     bool   `json:"sas,omitempty"`   // pairing: the phone shows the emoji (ClientConfig.OnSAS)
 }
 
 type byeMsg struct {
@@ -54,6 +55,15 @@ func newLimit(d time.Duration, conn net.Conn) *limit {
 	l := &limit{}
 	l.t = time.AfterFunc(d, func() { l.fired.Store(true); conn.Close() })
 	return l
+}
+
+// extend moves the limit to d from now; false when it had already run out.
+func (l *limit) extend(d time.Duration) bool {
+	if !l.t.Stop() || l.fired.Load() {
+		return false
+	}
+	l.t.Reset(d)
+	return true
 }
 
 // stop reports whether the limit had not run out yet.
@@ -107,6 +117,14 @@ func (s *Session) readFirst() (map[string]any, error) {
 	return m, nil
 }
 
+// wantProto is the version for a pairing or a connect.
+func wantProto(pair bool) int {
+	if pair {
+		return Proto
+	}
+	return ConnectProto
+}
+
 func protoOf(m map[string]any) int {
 	f, ok := m["proto"].(float64)
 	if !ok {
@@ -120,8 +138,12 @@ func protoOf(m map[string]any) int {
 // is the first thing Control().Recv returns.
 func Dial(conn net.Conn, cfg ClientConfig) (*Session, error) {
 	t := cfg.Timing.withDefaults()
-	lim := newLimit(t.Handshake, conn)
-	conn.SetDeadline(time.Now().Add(t.Handshake))
+	whole := t.Handshake
+	if cfg.Pair != nil {
+		whole += t.Confirm // the host's user compares the emoji before it answers
+	}
+	lim := newLimit(whole, conn)
+	conn.SetDeadline(time.Now().Add(whole))
 	s, err := dial(conn, cfg, t, lim)
 	if err != nil {
 		lim.stop()
@@ -132,11 +154,11 @@ func Dial(conn net.Conn, cfg ClientConfig) (*Session, error) {
 }
 
 func dial(conn net.Conn, cfg ClientConfig, t Timing, lim *limit) (*Session, error) {
+	pair := cfg.Pair != nil
 	proto := cfg.proto
 	if proto == 0 {
-		proto = Proto
+		proto = wantProto(pair)
 	}
-	pair := cfg.Pair != nil
 	hs, err := noise.NewHandshakeState(handshakeConfig(pair, true, cfg.Static, cfg.Server[:], []byte(prologue), nil))
 	if err != nil {
 		return nil, err
@@ -185,7 +207,7 @@ func dial(conn net.Conn, cfg ClientConfig, t Timing, lim *limit) (*Session, erro
 		hello.Proof = base64.RawURLEncoding.EncodeToString(p)
 	}
 	if pair {
-		hello.Device = cfg.Device
+		hello.Device, hello.SAS = cfg.Device, cfg.OnSAS != nil
 	}
 	if err := s.ctrl.Send(hello); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
@@ -194,9 +216,19 @@ func dial(conn net.Conn, cfg ClientConfig, t Timing, lim *limit) (*Session, erro
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrNoHello, err)
 	}
+	if pair && m["type"] == "pending" {
+		// The host checked the pairing and waits for its user: now the emoji mean something.
+		if cfg.OnSAS == nil {
+			return nil, ErrNoHello // a host must not wait for a check this phone does not show
+		}
+		cfg.OnSAS(SASText(s.binding))
+		if m, err = s.readFirst(); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrNoHello, err)
+		}
+	}
 	switch m["type"] {
 	case "hello":
-		if protoOf(m) != Proto {
+		if protoOf(m) != proto {
 			return nil, ErrProtoMismatch
 		}
 	case "bye":
@@ -254,6 +286,14 @@ func accept(conn net.Conn, cfg ServerConfig, t Timing, start time.Time, first, w
 		return nil, ErrBadPreamble
 	}
 	pair := pre[3] == modePair
+	limitAt := start.Add(t.Handshake)
+	if pair {
+		// A pairing waits for the host's user (Admit) as long as Confirm on top.
+		limitAt = limitAt.Add(t.Confirm)
+		if !whole.extend(time.Until(limitAt)) {
+			return nil, ErrHandshakeTimeout
+		}
+	}
 
 	static := noise.DHKey{Private: cfg.Identity.Private[:], Public: cfg.Identity.Public[:]}
 	hs, err := noise.NewHandshakeState(handshakeConfig(pair, false, static, nil, []byte(prologue), nil))
@@ -267,7 +307,7 @@ func accept(conn net.Conn, cfg ServerConfig, t Timing, start time.Time, first, w
 	if !first.stop() {
 		return nil, ErrHandshakeTimeout
 	}
-	conn.SetDeadline(start.Add(t.Handshake))
+	conn.SetDeadline(limitAt)
 	p0, _, _, err := hs.ReadMessage(nil, m0)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrHandshake, err)
@@ -309,13 +349,38 @@ func accept(conn net.Conn, cfg ServerConfig, t Timing, start time.Time, first, w
 	if m["type"] != "hello" {
 		return nil, ErrNoHello
 	}
-	if fp.Proto != Proto || protoOf(m) != Proto {
-		s.ctrl.Send(byeMsg{Type: "bye", Code: "proto-mismatch", Reason: fmt.Sprintf("this computer speaks proto %d", Proto)})
+	proto := wantProto(pair)
+	if fp.Proto != proto || protoOf(m) != proto {
+		s.ctrl.Send(byeMsg{Type: "bye", Code: "proto-mismatch", Reason: fmt.Sprintf("this computer speaks proto %d", proto)})
 		return nil, ErrProtoMismatch
 	}
 
 	phone, _ := m["phone"].(string)
 	peer := Peer{Static: remote, Pair: pair, Phone: phone, Binding: s.binding}
+	if pair {
+		peer.SAS, _ = m["sas"].(bool)
+		var once bool
+		peer.Pending = func() error {
+			if once {
+				return nil
+			}
+			once = true
+			return s.ctrl.Send(map[string]string{"type": "pending"})
+		}
+		// The phone sends nothing until the host answers, so a read that ends now is the phone gone.
+		// Whatever it reads stays first in line for the session (prefetchConn).
+		gone := make(chan struct{})
+		pf := &prefetchConn{Conn: conn, done: make(chan struct{})}
+		go func() {
+			pf.n, pf.err = conn.Read(pf.b[:])
+			if pf.err != nil {
+				close(gone)
+			}
+			close(pf.done)
+		}()
+		peer.Gone = gone
+		s.conn = pf
+	}
 	if p, ok := m["proof"].(string); ok {
 		peer.Proof, _ = base64.RawURLEncoding.DecodeString(p)
 	}
@@ -359,7 +424,7 @@ func accept(conn net.Conn, cfg ServerConfig, t Timing, start time.Time, first, w
 		undo()
 		return nil, ErrHandshakeTimeout
 	}
-	if err := s.ctrl.Send(helloMsg{Type: "hello", Proto: Proto, Version: cfg.Version}); err != nil {
+	if err := s.ctrl.Send(helloMsg{Type: "hello", Proto: proto, Version: cfg.Version}); err != nil {
 		undo()
 		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
 	}
@@ -374,4 +439,30 @@ func accept(conn net.Conn, cfg ServerConfig, t Timing, start time.Time, first, w
 	s.device = adm.Device
 	s.start()
 	return s, nil
+}
+
+// prefetchConn is a conn one Read of which already ran (to notice a phone hanging up during Admit):
+// its result comes first, then the conn's.
+type prefetchConn struct {
+	net.Conn
+	done  chan struct{}
+	b     [1]byte
+	n     int
+	err   error
+	taken bool
+}
+
+func (c *prefetchConn) Read(p []byte) (int, error) {
+	if !c.taken {
+		<-c.done
+		c.taken = true
+		if c.n > 0 && len(p) > 0 {
+			p[0] = c.b[0]
+			return 1, nil
+		}
+		if c.err != nil {
+			return 0, c.err
+		}
+	}
+	return c.Conn.Read(p)
 }

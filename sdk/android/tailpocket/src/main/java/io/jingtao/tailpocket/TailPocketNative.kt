@@ -16,6 +16,9 @@ interface TailPocketNative {
     // v0.3
     fun decodeInvite2(text: String, prefix: String): String
     fun pair2(op: Long, invite: String, key: String, device: String, derp: String, timeoutMs: Long): String
+    // v0.3.0-pre.4: pair2 returns {"emoji":[…]} first; pair2Finish waits for the computer's answer.
+    fun pair2Finish(op: Long, timeoutMs: Long): String
+    fun setTailcatOnly(on: Boolean)
     fun sync(handle: Long, timeoutMs: Long): String
     fun link(handle: Long): String
     fun path(handle: Long, timeoutMs: Long): String
@@ -35,6 +38,8 @@ internal object GoNative : TailPocketNative {
     override fun decodeInvite2(text: String, prefix: String): String = Connectmobile.decodeInvite2(text, prefix)
     override fun pair2(op: Long, invite: String, key: String, device: String, derp: String, timeoutMs: Long): String =
         Connectmobile.pair2(op, invite, key, device, derp, timeoutMs)
+    override fun pair2Finish(op: Long, timeoutMs: Long): String = Connectmobile.pair2Finish(op, timeoutMs)
+    override fun setTailcatOnly(on: Boolean) = Connectmobile.setTailcatOnly(on)
     override fun sync(handle: Long, timeoutMs: Long): String = Connectmobile.sync(handle, timeoutMs)
     override fun link(handle: Long): String = Connectmobile.link(handle)
     override fun path(handle: Long, timeoutMs: Long): String = Connectmobile.path(handle, timeoutMs)

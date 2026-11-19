@@ -33,6 +33,35 @@ test("pair sends the invite and options, and waits longer than a host call's def
   assert.ok((f.calls[0].timeoutMs ?? 0) > 90_000);
 });
 
+test("a v2 pairing hands the emoji to onEmoji while it waits, then stops listening", async () => {
+  let f: ReturnType<typeof fake>;
+  const seen: string[][] = [];
+  f = fake({ "tailPocket.pair": () => { f.emit("tailPocket.pair.emoji", { emoji: ["🐶", "🌙", "🍕", "🔑"] }); return link; } });
+  const tailPocket = createTailPocket(f.transport);
+  assert.deepEqual(await tailPocket.pair("tailpocket2:abc", { device: "Pixel", onEmoji: (e) => seen.push(e) }), link);
+  assert.deepEqual(seen, [["🐶", "🌙", "🍕", "🔑"]]);
+  assert.deepEqual(f.calls[0].args, { invite: "tailpocket2:abc", device: "Pixel" }, "the callback stays in JavaScript");
+  assert.ok((f.calls[0].timeoutMs ?? 0) > 90_000 + 60_000, "the computer's user gets their minute");
+  assert.equal(f.listeners.get("tailPocket.pair.emoji")?.size, 0);
+  f.emit("tailPocket.pair.emoji", { emoji: ["late"] });
+  assert.equal(seen.length, 1);
+});
+
+test("a refusal after the emoji rejects with unauthorized and stops listening", async () => {
+  let f: ReturnType<typeof fake>;
+  f = fake({ "tailPocket.pair": () => { f.emit("tailPocket.pair.emoji", { emoji: ["🐶", "🌙", "🍕", "🔑"] }); throw new Error("unauthorized"); } });
+  let shown = 0;
+  await assert.rejects(createTailPocket(f.transport).pair("tailpocket2:abc", { device: "Pixel", onEmoji: () => shown++ }), (e: any) => e.code === "unauthorized");
+  assert.equal(shown, 1);
+  assert.equal(f.listeners.get("tailPocket.pair.emoji")?.size, 0);
+});
+
+test("setTailcatOnly goes to the bridge", async () => {
+  const f = fake({ "tailPocket.setTailcatOnly": null });
+  await createTailPocket(f.transport).setTailcatOnly(true);
+  assert.deepEqual(f.calls, [{ name: "tailPocket.setTailcatOnly", args: { on: true }, timeoutMs: undefined }]);
+});
+
 test("a rejection becomes TailPocketError with the native code", async () => {
   const nsh = fake({ "tailPocket.connect": () => { throw new Error("not-paired"); } });
   await assert.rejects(createTailPocket(nsh.transport).connect(), (e: any) => e instanceof TailPocketError && e.code === "not-paired");
@@ -41,9 +70,11 @@ test("a rejection becomes TailPocketError with the native code", async () => {
 });
 
 test("connect returns the base URL and closes by handle", async () => {
-  const f = fake({ "tailPocket.connect": { handle: 7, port: 50123, baseUrl: "http://127.0.0.1:50123" }, "tailPocket.disconnect": null });
+  const f = fake({ "tailPocket.connect": { handle: 7, port: 50123, baseUrl: "http://127.0.0.1:50123/_tailpocket/TOK", token: "TOK" }, "tailPocket.disconnect": null });
   const c = await createTailPocket(f.transport).connect({ slot: "work" });
-  assert.equal(c.baseUrl, "http://127.0.0.1:50123");
+  assert.equal(c.baseUrl, "http://127.0.0.1:50123/_tailpocket/TOK");
+  assert.ok(c.baseUrl.includes(`/_tailpocket/${c.token}`));
+  assert.equal(c.token, "TOK");
   assert.equal(c.port, 50123);
   await c.close();
   assert.deepEqual(f.calls.map((x) => [x.name, x.args]), [["tailPocket.connect", { slot: "work" }], ["tailPocket.disconnect", { handle: 7 }]]);
@@ -99,13 +130,13 @@ test("the names it calls are the bridge's names", async () => {
   const t: TailPocketTransport = { async call(n) { names.add(n); return n === "tailPocket.local.begin" ? { op: 1, code: "1" } : n === "tailPocket.connect" ? { handle: 1, port: 1, baseUrl: "" } : null; }, on: () => () => {} };
   const tailPocket = createTailPocket(t);
   await tailPocket.newKey(); await tailPocket.publicKey("k"); await tailPocket.inviteText("t"); await tailPocket.decodeInvite("t"); await tailPocket.pair("t", { device: "d" });
-  await tailPocket.decodeInvite2("t");
+  await tailPocket.decodeInvite2("t"); await tailPocket.setTailcatOnly(false);
   const conn = await tailPocket.connect(); await conn.sync(); await conn.path(); await conn.link(); await conn.close();
   await (await tailPocket.nearby("s", () => {}))(); const p = await tailPocket.pairNearby({ name: "n" }); await p.finish(); await p.cancel();
   await tailPocket.scan(); await tailPocket.store.phoneKey(); await tailPocket.store.saveLink(link); await tailPocket.store.link(); await tailPocket.store.deleteLink();
   const { readFileSync } = await import("node:fs");
   const kotlin = readFileSync(new URL("../../android/tailpocket/src/main/java/io/jingtao/tailpocket/Bridge.kt", import.meta.url), "utf8");
-  const bridge = [...kotlin.matchAll(/"(tailPocket\.[a-zA-Z0-9.]+)"/g)].map((m) => m[1]).filter((n) => n !== "tailPocket.nearby");
+  const bridge = [...kotlin.matchAll(/"(tailPocket\.[a-zA-Z0-9.]+)"/g)].map((m) => m[1]).filter((n) => n !== "tailPocket.nearby" && n !== "tailPocket.pair.emoji"); // events
   assert.deepEqual([...names].sort(), [...new Set(bridge)].sort());
 });
 

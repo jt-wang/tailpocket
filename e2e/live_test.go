@@ -151,7 +151,13 @@ func TestLiveQRPairConnectRestartRevoke(t *testing.T) {
 	phonePub, _ := connectphone.PublicKey(phoneKey)
 	started = time.Now()
 	pairCtx, pairCancel := context.WithTimeout(ctx, 90*time.Second)
-	link, err := connectphone.Pair(pairCtx, inv, phoneKey, connectphone.Options{Device: "e2e phone"})
+	// The first phone reads the v1 code the way the SDKs do (DecodeV2, then PairV2): it pairs the v1
+	// way, since a v1 code names no Noise key. The second phone below uses Pair.
+	inv2, err := connectinvite.DecodeV2(qr, connectinvite.DefaultPrefix)
+	if err != nil || inv2.PK != "" || inv2.Via[0].Inv == nil || *inv2.Via[0].Inv != inv {
+		t.Fatalf("v1 code read as v2: %+v %v", inv2, err)
+	}
+	link, err := connectphone.PairV2(pairCtx, inv2, phoneKey, connectphone.Options{Device: "e2e phone"})
 	pairCancel()
 	if err != nil {
 		t.Fatalf("pair: %v", err)
@@ -177,7 +183,13 @@ func TestLiveQRPairConnectRestartRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	roundTrip(t, ctx, func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", f.Addr()) }, phonePub)
+	roundTrip(t, ctx, func(ctx context.Context) (net.Conn, error) {
+		c, err := (&net.Dialer{}).DialContext(ctx, "tcp", f.Addr())
+		if err == nil {
+			_, err = c.Write([]byte("TP-FWD " + f.Token() + "\n"))
+		}
+		return c, err
+	}, phonePub)
 	f.Close()
 	s.Close()
 

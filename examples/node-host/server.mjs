@@ -1,8 +1,9 @@
-// A complete host in ~40 lines: an HTTP server that paired phones reach from anywhere.
+// A complete host in ~50 lines: an HTTP server that paired phones reach from anywhere.
 //
 //   node examples/node-host/server.mjs            # prints a pairing code; scan it with the phone
 //   TAILPOCKET_SERVICE=_myapp._tcp node …                 # also lets phones on this Wi-Fi find it
 //   TAILPOCKET_RELAY_URL=wss://relay.example.com TAILPOCKET_RELAY_TOKEN=… node …   # also over your tailpocket-relay
+//   TAILPOCKET_EMOJI=1 node …                             # a v0.3 code (every route) with the emoji check
 //
 // TailPocketHostState (identity + paired phones) is kept in ./host-state.json; delete it to forget all phones.
 import { createServer } from 'node:http';
@@ -31,15 +32,26 @@ const connectHost = await TailPocketHost.start({
   save: (next) => writeFileSync(stateFile, JSON.stringify(next), { mode: 0o600 }),
 });
 
-const pairing = await connectHost.pair({ ttl: 300, payload: 'welcome' });
-console.log(`QR ${pairing.qr}`); // render it with any QR library, or paste it into the phone
-console.log(`QR2 ${pairing.qr2}`); // the v2 code: every route, for v0.3 phones
+// TAILPOCKET_EMOJI=1 (or a relay) opens a v0.3 window: one code for every route, and the user compares the four
+// emoji the phone shows with the ones printed here. Without it, a v0.2-style Tailcat code.
+const emoji = process.env.TAILPOCKET_EMOJI === '1' || !!process.env.TAILPOCKET_RELAY_URL;
+let ask;
+const yes = async (question) => process.env.TAILPOCKET_AUTO_APPROVE === '1'
+  || /^y/i.test(await (ask ??= createInterface({ input: process.stdin, output: process.stderr })).question(question));
+const pairing = await connectHost.pair({ ttl: 300, payload: 'welcome', emoji });
+if (emoji) {
+  console.log(`QR2 ${pairing.qr2}`); // render it with any QR library, or paste it into the phone
+  pairing.on('request', async ({ device, emoji: shown }) => {
+    console.log(`EMOJI ${device} ${shown.join(' ')}`);
+    pairing.confirm(await yes(`${device} shows ${shown.join(' ')}? [y/N] `));
+  });
+} else {
+  console.log(`QR ${pairing.qr}`);
+}
 if (process.env.TAILPOCKET_SERVICE) {
-  const ask = createInterface({ input: process.stdin, output: process.stderr });
   pairing.local({
     service: process.env.TAILPOCKET_SERVICE,
-    confirm: async (code, device) => process.env.TAILPOCKET_AUTO_APPROVE === '1'
-      || /^y/i.test(await ask.question(`${device} shows ${code}? [y/N] `)),
+    confirm: (code, device) => yes(`${device} shows ${code}? [y/N] `),
   }).catch(() => {});
 }
 pairing.paired.then(({ device }) => console.log(`PAIRED ${device}`), () => console.log('EXPIRED'));

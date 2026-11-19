@@ -1,10 +1,13 @@
 package connectphone
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -100,7 +103,7 @@ func TestForwardBridgesEachConnectionLazily(t *testing.T) {
 		t.Fatalf("addr %s", f.Addr())
 	}
 	for i := 0; i < 2; i++ {
-		c, err := net.Dial("tcp", f.Addr())
+		c, err := dialForward(f)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -120,7 +123,7 @@ func TestForwardBridgesEachConnectionLazily(t *testing.T) {
 func TestForwardCloseCutsOpenConnections(t *testing.T) {
 	dial, _ := echoDialer()
 	f, _ := startForward(dial)
-	c, err := net.Dial("tcp", f.Addr())
+	c, err := dialForward(f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +149,7 @@ func TestForwardCloseCutsOpenConnections(t *testing.T) {
 func TestForwardDialFailureClosesLocalConnection(t *testing.T) {
 	f, _ := startForward(func(context.Context) (net.Conn, error) { return nil, errors.New("unreachable") })
 	defer f.Close()
-	c, _ := net.Dial("tcp", f.Addr())
+	c, _ := dialForward(f)
 	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
 	if _, err := c.Read(make([]byte, 1)); err == nil {
 		t.Fatal("read succeeded")
@@ -171,9 +174,138 @@ func TestForwardDialFailureWithTypedNilConnDoesNotPanic(t *testing.T) {
 		return c, errors.New("connection refused")
 	})
 	defer f.Close()
-	c, _ := net.Dial("tcp", f.Addr())
+	c, _ := dialForward(f)
 	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
 	if _, err := c.Read(make([]byte, 1)); err == nil {
 		t.Fatal("read succeeded")
 	}
+}
+
+// dialForward connects to f the way the app does: with the token preamble.
+func dialForward(f *Forward) (net.Conn, error) {
+	c, err := net.Dial("tcp", f.Addr())
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.WriteString(c, "TP-FWD "+f.Token()+"\n"); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+// F1: only what presents the forward's token reaches the host. HTTP and WebSocket requests carry it
+// in the path under BasePath or in a header, which the host never sees; anything else is refused
+// before the host is dialed.
+func TestForwardCarriesOnlyRequestsWithTheToken(t *testing.T) {
+	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") == "echo" {
+			w.Header().Set("Connection", "Upgrade")
+			w.Header().Set("Upgrade", "echo")
+			w.WriteHeader(http.StatusSwitchingProtocols)
+			c, rw, _ := http.NewResponseController(w).Hijack()
+			defer c.Close()
+			_ = rw.Flush()
+			_, _ = io.Copy(c, rw)
+			return
+		}
+		_, _ = io.WriteString(w, r.RequestURI+" token="+r.Header.Get(ForwardTokenHeader))
+	}))
+	defer host.Close()
+	var dials atomic.Int32
+	f, err := startForward(func(ctx context.Context) (net.Conn, error) {
+		dials.Add(1)
+		return (&net.Dialer{}).DialContext(ctx, "tcp", host.Listener.Addr().String())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	other, _ := startForward(func(context.Context) (net.Conn, error) { return nil, errors.New("unused") })
+	other.Close()
+	if f.Token() == other.Token() || len(f.Token()) < 40 || f.BasePath() != "/_tailpocket/"+f.Token() {
+		t.Fatalf("tokens %q %q base %q", f.Token(), other.Token(), f.BasePath())
+	}
+	base := "http://" + f.Addr()
+	get := func(path string, header ...string) (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest("GET", base+path, nil)
+		for i := 0; i+1 < len(header); i += 2 {
+			req.Header.Add(header[i], header[i+1])
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		b, _ := io.ReadAll(res.Body)
+		return res.StatusCode, string(b)
+	}
+	for name, c := range map[string][]string{
+		"no token":          {"/api/info"},
+		"other token":       {"/_tailpocket/" + other.Token() + "/api/info"},
+		"token prefix":      {"/_tailpocket/" + f.Token()[:20] + "/api/info"},
+		"wrong header":      {"/api/info", ForwardTokenHeader, other.Token()},
+		"two headers":       {"/api/info", ForwardTokenHeader, f.Token(), ForwardTokenHeader, f.Token()},
+		"header beats path": {f.BasePath() + "/api/info", ForwardTokenHeader, other.Token()},
+	} {
+		if code, _ := get(c[0], c[1:]...); code != http.StatusForbidden {
+			t.Errorf("%s: %d", name, code)
+		}
+	}
+	if dials.Load() != 0 {
+		t.Fatalf("the host was dialed %d times for refused requests", dials.Load())
+	}
+	if code, body := get(f.BasePath() + "/api/info?x=1"); code != 200 || body != "/api/info?x=1 token=" {
+		t.Fatalf("path token: %d %q", code, body)
+	}
+	if code, body := get(f.BasePath()); code != 200 || body != "/ token=" {
+		t.Fatalf("bare base: %d %q", code, body)
+	}
+	if code, body := get("/api/info", ForwardTokenHeader, f.Token()); code != 200 || body != "/api/info token=" {
+		t.Fatalf("header token: %d %q", code, body)
+	}
+
+	// A raw first line with a wrong token, and bytes that are not HTTP, are closed undialed.
+	before := dials.Load()
+	for _, send := range []string{"TP-FWD " + other.Token() + "\n", "\x16\x03\x01\x00\x05hello\r\n\r\n"} {
+		c, err := net.Dial("tcp", f.Addr())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.WriteString(c, send)
+		_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		b, _ := io.ReadAll(c)
+		c.Close()
+		if strings.Contains(string(b), " 200 ") || strings.Contains(string(b), "token=") {
+			t.Fatalf("%q answered %q", send, b)
+		}
+	}
+	if dials.Load() != before {
+		t.Fatal("the host was dialed for a refused connection")
+	}
+
+	// A WebSocket-style upgrade under BasePath is carried both ways.
+	c, err := net.Dial("tcp", f.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, _ = io.WriteString(c, "GET "+f.BasePath()+"/hc HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+	br := bufio.NewReader(c)
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	res, err := http.ReadResponse(br, nil)
+	if err != nil || res.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade %v %v", res, err)
+	}
+	_, _ = io.WriteString(c, "ping")
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(br, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("after upgrade %q %v", buf, err)
+	}
+}
+
+func timedOut(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }

@@ -59,7 +59,11 @@ class TailPocketBridge(
         "tailPocket.pair" to { a ->
             // Text and v2 objects pair over every route (a v1 text as its one tailcat route); a v1 object over Tailcat.
             val invite = when (val i = a["invite"]) {
-                is String -> sdk.decodeInvite2(TailPocket.inviteText(i, a.prefix()) ?: i, a.prefix())
+                is String -> {
+                    val prefix2 = a.optString("prefix2") ?: TailPocket.DEFAULT_PREFIX2
+                    val text = TailPocket.inviteText(i, listOf(prefix2, a.prefix())) ?: i
+                    sdk.decodeInvite2(text, if (text.startsWith(prefix2)) prefix2 else a.prefix())
+                }
                 is Map<*, *> -> if ((i["v"] as? Number)?.toInt() == 2) fromValue(TailPocketInvite2.serializer(), i) else {
                     val v1 = fromValue(TailPocketInvite.serializer(), i)
                     TailPocketInvite2(v = 2, name = v1.name, exp = v1.expiresAt, via = listOf(TailPocketRoute(t = "tailcat", inv = v1)))
@@ -67,10 +71,13 @@ class TailPocketBridge(
                 else -> throw TailPocketException("invalid-arguments")
             }
             val key = (a["phoneKey"] as? String) ?: store.phoneKey()
-            val link = sdk.pair(invite, key, a.optString("device") ?: "Phone", a.optString("derpMapUrl") ?: "", a.long("timeoutMs") ?: 90_000)
+            val link = sdk.pair(invite, key, a.optString("device") ?: "Phone", a.optString("derpMapUrl") ?: "", a.long("timeoutMs") ?: 90_000) { emoji ->
+                emit("tailPocket.pair.emoji", mapOf("emoji" to emoji))
+            }
             if (a["save"] == true) store.saveLink(link, a.optString("slot") ?: "default")
             toValue(TailPocketHostLink.serializer(), link)
         },
+        "tailPocket.setTailcatOnly" to { a -> sdk.setTailcatOnly(a["on"] == true); null },
         "tailPocket.connect" to { a ->
             var slot: String? = null
             val link = when (val l = a["link"]) {
@@ -81,7 +88,7 @@ class TailPocketBridge(
             val c = sdk.connect(link, a.optString("derpMapUrl") ?: "")
             val handle = ops.incrementAndGet()
             connections[handle] = c to slot
-            mapOf("handle" to handle, "port" to c.port, "baseUrl" to c.baseUrl)
+            mapOf("handle" to handle, "port" to c.port, "baseUrl" to c.baseUrl, "token" to c.token)
         },
         "tailPocket.disconnect" to { a ->
             connections.remove(a.long("handle") ?: -1)?.let { (c, slot) ->
@@ -158,6 +165,7 @@ class TailPocketBridge(
             "tailPocket.pair", "tailPocket.connect", "tailPocket.disconnect", "tailPocket.sync", "tailPocket.path", "tailPocket.link",
             "tailPocket.nearby.start", "tailPocket.nearby.stop", "tailPocket.local.begin", "tailPocket.local.finish", "tailPocket.local.cancel", "tailPocket.scan",
             "tailPocket.store.phoneKey", "tailPocket.store.saveLink", "tailPocket.store.link", "tailPocket.store.deleteLink",
+            "tailPocket.setTailcatOnly",
         )
 
         /** A bridge with the Keystore store and NsdManager discovery. */

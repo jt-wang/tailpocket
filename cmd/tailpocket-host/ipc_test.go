@@ -32,12 +32,15 @@ func TestConfigErrorsAreOneFixedLine(t *testing.T) {
 		"":           "invalid-config",
 		"not json\n": "invalid-config",
 		`{"v":2,"forward":"127.0.0.1:8080"}` + "\n": "unsupported-version",
-		`{"v":1}` + "\n":                                                                            "invalid-forward",
-		`{"v":1,"forward":"nowhere"}` + "\n":                                                        "invalid-forward",
-		`{"v":1,"forward":"127.0.0.1:8080","identity":"x"}` + "\n":                                  "invalid-identity",
-		`{"v":1,"forward":"127.0.0.1:8080","allowed":["nodekey:zz"]}` + "\n":                        "invalid-allowed",
-		`{"v":1,"forward":"127.0.0.1:8080","relays":[{"url":"ws://192.0.2.1","token":"t"}]}` + "\n": "invalid-config",
-		`{"v":1,"forward":"127.0.0.1:8080","listen":["0.0.0.0:7681"]}` + "\n":                       "invalid-config",
+		`{"v":1}` + "\n":                                                                                                "invalid-forward",
+		`{"v":1,"forward":"nowhere"}` + "\n":                                                                            "invalid-forward",
+		`{"v":1,"forward":"127.0.0.1:8080","identity":"x"}` + "\n":                                                      "invalid-identity",
+		`{"v":1,"forward":"127.0.0.1:8080","allowed":["nodekey:zz"]}` + "\n":                                            "invalid-allowed",
+		`{"v":1,"forward":"127.0.0.1:8080","relays":[{"url":"ws://192.0.2.1","token":"t"}]}` + "\n":                     "invalid-config",
+		`{"v":1,"forward":"127.0.0.1:8080","listen":["0.0.0.0:7681"]}` + "\n":                                           "invalid-config",
+		`{"v":1,"forward":"127.0.0.1:8080","tailcatOnly":true,"relays":[{"url":"wss://r.example","token":"t"}]}` + "\n": "invalid-config",
+		`{"v":1,"forward":"127.0.0.1:8080","tailcatOnly":true,"listen":["192.168.1.20:7681"]}` + "\n":                   "invalid-config",
+		`{"v":1,"forward":"127.0.0.1:8080","relays":[{"url":"wss://r.example","token":"t","opaque":true}]}` + "\n":      "invalid-config",
 	}
 	for config, code := range cases {
 		out, err := runWith(t, config)
@@ -236,6 +239,10 @@ func answering(ev *eventStream, send func(any), allow func(phone string) bool, a
 				send(map[string]any{"cmd": "authorized", "id": e["id"], "ok": allow(phone)})
 			case "audit":
 				audits.Store(e["kind"], true)
+			case "pairRequest":
+				if em, _ := e["emoji"].([]any); len(em) == 4 { // the computer's user compares them
+					send(map[string]any{"cmd": "confirm", "id": e["id"], "approve": true})
+				}
 			}
 			out.ch <- e
 		}
@@ -300,8 +307,11 @@ func TestLiveHelperRelay(t *testing.T) {
 	send(map[string]any{"v": 1, "name": "helper host", "forward": app.Addr().String(), "identifyPhone": true,
 		"relays": []any{map[string]any{"url": url, "token": "relay-token"}}, "authorize": true, "audit": true})
 	ev.next(t, "ready")
-	send(map[string]any{"cmd": "pair", "id": "w1", "ttl": 120, "payload": "token-123"})
+	send(map[string]any{"cmd": "pair", "id": "w1", "ttl": 120, "payload": "token-123", "emoji": true})
 	pairing := ev.next(t, "pairing")
+	if pairing["qr"] != nil || pairing["invite"] != nil {
+		t.Fatalf("an emoji window handed out a v1 invite: %v", pairing)
+	}
 	inv, err := connectinvite.DecodeV2(pairing["qr2"].(string), connectinvite.DefaultPrefix2)
 	if err != nil {
 		t.Fatal(err)
@@ -317,7 +327,7 @@ func TestLiveHelperRelay(t *testing.T) {
 	defer cancel()
 	key := connectphone.NewKey()
 	pub, _ := connectphone.PublicKey(key)
-	link, err := connectphone.PairV2(ctx, inv, key, connectphone.Options{Device: "helper phone"})
+	link, err := connectphone.PairV2(ctx, inv, key, connectphone.Options{OnSAS: func([]string) {}, Device: "helper phone"})
 	if err != nil {
 		t.Fatal(err)
 	}

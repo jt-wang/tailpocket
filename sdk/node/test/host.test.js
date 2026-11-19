@@ -81,7 +81,7 @@ test('pair rejects after close', async () => {
   await assert.rejects(host.pair(), /closed/);
 });
 
-test('v0.3: relays, the v2 QR, authorize, audit, status and disconnect', async () => {
+test('v0.3: relays, authorize, audit, status and disconnect; no v2 QR without emoji', async () => {
   const phone = 'nodekey:' + 'cd'.repeat(32);
   const asked = [];
   let audited;
@@ -96,11 +96,73 @@ test('v0.3: relays, the v2 QR, authorize, audit, status and disconnect', async (
   assert.equal(e.kind, 'denied');
   assert.ok(e.time instanceof Date);
   const pairing = await host.pair({ payload: 'wait' });
-  assert.equal(pairing.qr2, 'tailpocket2:FAKE');
-  assert.equal(pairing.invite2.v, 2);
+  assert.equal(pairing.qr, 'tailpocket1:FAKE');
+  assert.equal(pairing.qr2, undefined, 'a window without emoji hands out no v2 invite');
+  assert.equal(pairing.invite2, undefined);
   const st = await host.status();
   assert.equal(st.relays['wss://relay.example.com'], 'up');
   assert.equal(st.routes[0].t, 'relay');
   await host.disconnect(phone);
   await host.close();
+});
+
+test('emoji window: only the v2 invite, a request with the emoji, and confirm(true) pairs', async () => {
+  const { host, saved } = await start();
+  const pairing = await host.pair({ ttl: 60, payload: 'token', emoji: true });
+  assert.equal(pairing.qr2, 'tailpocket2:FAKE');
+  assert.equal(pairing.invite2.v, 2);
+  assert.equal(pairing.qr, undefined, 'an emoji window hands out no v1 invite');
+  assert.equal(pairing.invite, undefined);
+  const request = await new Promise((resolve) => pairing.once('request', resolve));
+  assert.deepEqual(request, { phone: 'nodekey:' + 'ab'.repeat(32), device: 'Pixel', route: 'relay', emoji: ['🐶', '🌙', '🍕', '🔑'] });
+  pairing.confirm(true);
+  const phone = await pairing.paired;
+  assert.equal(phone.phone, request.phone);
+  assert.deepEqual(saved.at(-1).allowed, [phone.phone]);
+  assert.equal(await pairing.closed, 'paired');
+  await host.close();
+});
+
+test('emoji window: confirm(false) refuses the phone and spends the code', async () => {
+  const { host, saved } = await start();
+  const pairing = await host.pair({ payload: 'token', emoji: true });
+  pairing.on('request', () => pairing.confirm(false));
+  await assert.rejects(pairing.paired, (e) => e.code === 'expired');
+  assert.equal(await pairing.closed, 'expired');
+  assert.equal(saved.length, 0);
+  await host.close();
+});
+
+test('emoji window: no request listener refuses at once', async () => {
+  const { host } = await start();
+  const pairing = await host.pair({ payload: 'token', emoji: true });
+  assert.equal(await pairing.closed, 'expired');
+  await assert.rejects(pairing.paired, (e) => e.code === 'expired');
+  await host.close();
+});
+
+test('emoji window: a phone that leaves before the answer cancels its request', async () => {
+  const { host } = await start();
+  const pairing = await host.pair({ payload: 'leave', emoji: true });
+  const seen = [];
+  pairing.on('request', (r) => seen.push(r.route));
+  pairing.on('requestCancelled', () => seen.push('cancelled'));
+  assert.equal(await pairing.closed, 'expired');
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(seen, ['lan', 'cancelled']);
+  await host.close();
+});
+
+test('pre.4 config: tailcatOnly, noLan, and appAuth with an opaque relay', async () => {
+  const only = await start({ tailcatOnly: true });
+  assert.deepEqual((await only.host.status()).routes, [{ t: 'tailcat' }]);
+  await only.host.close();
+  const noLan = await start({ noLan: true, relays: [{ url: 'wss://relay.example.com', token: 't' }] });
+  assert.deepEqual((await noLan.host.status()).routes.map((r) => r.t), ['relay']);
+  await noLan.host.close();
+  await assert.rejects(start({ tailcatOnly: true, relays: [{ url: 'wss://relay.example.com', token: 't' }] }), (e) => e.code === 'invalid-config');
+  await assert.rejects(start({ relays: [{ url: 'wss://relay.example.com', token: 't', opaque: true }] }), (e) => e.code === 'invalid-config');
+  const opaque = await start({ relays: [{ url: 'wss://relay.example.com', token: 't', opaque: true, appAuth: true }] });
+  assert.equal((await opaque.host.status()).routes[0].m, 'opaque');
+  await opaque.host.close();
 });

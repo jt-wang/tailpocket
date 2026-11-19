@@ -19,9 +19,14 @@ export interface TailPocketHostLink { address?: string; port?: number; name: str
 /** `direct` or `relay` over Tailcat, `relay` over your tailpocket-relay (`relay` is its host name), or `lan`. */
 export interface TailPocketPath { route: "direct" | "relay" | "lan" | string; relay: string }
 export interface TailPocketConnection {
-  /** `http://127.0.0.1:<port>`: requests to it reach the computer's forwarded port. */
+  /** `http://127.0.0.1:<port>/_tailpocket/<token>`: requests under it reach the computer's forwarded port, without the prefix.
+   *  Build every URL by appending to it (`${baseUrl}/api/info`); a URL resolved against "/" (`new URL("/api/info", baseUrl)`)
+   *  drops the prefix and gets 403, since any program on the phone can reach the loopback port. */
   baseUrl: string;
   port: number;
+  /** The secret every connection to the forward presents: in `baseUrl`'s path, or the header `Tailpocket-Token`. A client of
+   *  another protocol (its own TLS) starts the connection with the line `TP-FWD <token>\n`. Keep it in memory only. */
+  token: string;
   /** Registers this phone's end-to-end key over Tailcat (links from before v0.3) and returns the updated link; a link from the store is saved. */
   sync(timeoutMs?: number): Promise<TailPocketHostLink>;
   /** How the connection reaches the computer now; rejects with `revoked` once the computer removed this phone. */
@@ -39,7 +44,7 @@ export interface TailPocketPendingPairing {
   cancel(): Promise<void>;
 }
 
-/** Codes: invalid-invite, expired, unreachable, revoked (delete the link), mismatch, handshake-closed, denied, not-paired,
+/** Codes: invalid-invite, expired, unauthorized (after the emoji: refused on the computer, or a spent code), unreachable, revoked (delete the link), mismatch, handshake-closed, denied, not-paired,
  *  unsupported, cancelled, unknown-handle, … Only `revoked` means the computer removed this phone. */
 export class TailPocketError extends Error {
   code: string;
@@ -51,6 +56,8 @@ export class TailPocketError extends Error {
 }
 
 const PAIR_TIMEOUT_MS = 90_000;
+// A v2 pairing also waits for the computer's user to compare the emoji (the native side adds a minute).
+const CONFIRM_MS = 60_000;
 const LOCAL_TIMEOUT_MS = 300_000;
 // The native side times out first; the transport only needs to outlast it.
 const SLACK_MS = 15_000;
@@ -81,16 +88,32 @@ export function createTailPocket(transport: TailPocketTransport) {
     /** The camera, until a QR with an invite: v1 or v2 with the default prefixes, else `prefix` (and `prefix2`, the app's v2 prefix). */
     scan: (prefix?: string, prefix2?: string) => call<string>("tailPocket.scan", { ...(prefix ? { prefix } : {}), ...(prefix2 ? { prefix2 } : {}) }, 0),
 
-    /** Pairs with the computer that made `invite` (the QR text, or a decoded invite) over whichever of its routes works. */
-    pair: (invite: string | TailPocketInvite | TailPocketInvite2, options: { device: string; save?: boolean; slot?: string; phoneKey?: string; timeoutMs?: number; derpMapUrl?: string }) =>
-      call<TailPocketHostLink>("tailPocket.pair", { invite, ...options }, (options.timeoutMs ?? PAIR_TIMEOUT_MS) + SLACK_MS),
+    /** Pairs with the computer that made `invite` (the QR text, or a decoded invite) over whichever of its routes works.
+     *  A v2 invite (v0.3 computers) calls `onEmoji` with four emoji once the computer waits for its user to compare them:
+     *  show them with "Check that your computer shows the same, then confirm there"; the promise then resolves with the
+     *  link once the computer's user confirms. `unauthorized` after the emoji: the user said no or the code was spent,
+     *  so ask for a new code on the computer. A phone pairing again after a lost reply gets the link with no emoji. */
+    pair: async (invite: string | TailPocketInvite | TailPocketInvite2,
+                 options: { device: string; save?: boolean; slot?: string; phoneKey?: string; timeoutMs?: number; derpMapUrl?: string; onEmoji?: (emoji: string[]) => void }) => {
+      const { onEmoji, ...rest } = options;
+      const sub = onEmoji ? transport.on("tailPocket.pair.emoji", (data) => onEmoji(((data as { emoji?: string[] })?.emoji) ?? [])) : undefined;
+      try {
+        return await call<TailPocketHostLink>("tailPocket.pair", { invite, ...rest }, (options.timeoutMs ?? PAIR_TIMEOUT_MS) + CONFIRM_MS + SLACK_MS);
+      } finally {
+        unsubscribe(sub);
+      }
+    },
+
+    /** Reach computers over Tailcat only: pair, connect and sync then never use the relay or local network routes a
+     *  computer lists. Set it before `connect`; open connections keep the setting they started with. */
+    setTailcatOnly: (on: boolean) => call<void>("tailPocket.setTailcatOnly", { on }),
 
     /** Opens the tunnel to a saved (or given) computer. */
     connect: async (options: { link?: TailPocketHostLink; slot?: string; derpMapUrl?: string } = {}): Promise<TailPocketConnection> => {
-      const c = await call<{ handle: number; port: number; baseUrl: string }>("tailPocket.connect", options);
+      const c = await call<{ handle: number; port: number; baseUrl: string; token: string }>("tailPocket.connect", options);
       const handle = c.handle;
       return {
-        baseUrl: c.baseUrl, port: c.port,
+        baseUrl: c.baseUrl, port: c.port, token: c.token,
         sync: (timeoutMs?: number) => call<TailPocketHostLink>("tailPocket.sync", timeoutMs ? { handle, timeoutMs } : { handle }, (timeoutMs ?? 30_000) + SLACK_MS),
         path: (timeoutMs?: number) => call<TailPocketPath>("tailPocket.path", timeoutMs ? { handle, timeoutMs } : { handle }, (timeoutMs ?? 5_000) + SLACK_MS),
         link: () => call<TailPocketHostLink>("tailPocket.link", { handle }),

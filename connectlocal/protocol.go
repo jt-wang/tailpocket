@@ -2,7 +2,9 @@ package connectlocal
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -160,28 +162,24 @@ func (s *server) handle(conn net.Conn, b Binding) {
 		s.mu.Unlock()
 	}()
 
-	// A silent peer must not hold the single slot for the whole window.
+	// From here on, anything unexpected closes the connection without a reply: no fallback to v1.
+	// A silent peer must not hold the single slot for the whole window: the commitment and the
+	// reveal each get HelloTimeout.
 	_ = conn.SetDeadline(minTime(time.Now().Add(s.hello), s.opts.Expires))
 	reader := bufio.NewReaderSize(conn, MaxLine+1)
-	line, err := readLine(reader)
-	if err != nil {
+	var hello struct {
+		V      int    `json:"v"`
+		Commit string `json:"commit"`
+		Device string `json:"device"`
+	}
+	if readStrict(reader, &hello) != nil || hello.V != wireVersion {
 		return
 	}
-	var msg struct {
-		V         int    `json:"v"`
-		PublicKey string `json:"publicKey"`
-		Device    string `json:"device"`
-	}
-	if json.Unmarshal(line, &msg) != nil || msg.V != wireVersion {
-		_ = writeLine(conn, s.denial())
+	commit, ok := decode32(hello.Commit)
+	if !ok {
 		return
 	}
-	phoneKey, err := base64.StdEncoding.DecodeString(msg.PublicKey)
-	if err != nil || len(phoneKey) != 32 || base64.StdEncoding.EncodeToString(phoneKey) != msg.PublicKey {
-		_ = writeLine(conn, s.denial())
-		return
-	}
-	device := connectinvite.CleanName(msg.Device)
+	device := connectinvite.CleanName(hello.Device)
 	if device == "" {
 		device = "Phone"
 	}
@@ -189,15 +187,31 @@ func (s *server) handle(conn net.Conn, b Binding) {
 	if err != nil {
 		return
 	}
-	session, err := NewSession(s.opts.Label, own, phoneKey, false)
-	if err != nil {
-		_ = writeLine(conn, s.denial())
-		return
-	}
-	_ = conn.SetDeadline(s.opts.Expires)
 	if writeLine(conn, map[string]any{"publicKey": base64.StdEncoding.EncodeToString(own.Public[:]), "v": wireVersion}) != nil {
 		return
 	}
+	_ = conn.SetDeadline(minTime(time.Now().Add(s.hello), s.opts.Expires))
+	var reveal struct {
+		V         int    `json:"v"`
+		PublicKey string `json:"publicKey"`
+		Nonce     string `json:"nonce"`
+	}
+	if readStrict(reader, &reveal) != nil || reveal.V != wireVersion {
+		return
+	}
+	phoneKey, okKey := decode32(reveal.PublicKey)
+	nonce, okNonce := decode32(reveal.Nonce)
+	if !okKey || !okNonce {
+		return
+	}
+	if want := Commit(s.opts.Label, phoneKey, nonce); subtle.ConstantTimeCompare(want[:], commit) != 1 {
+		return // the phone, or someone in the middle, changed its key after seeing the host's
+	}
+	session, err := NewSession(s.opts.Label, own, phoneKey, false, nonce)
+	if err != nil {
+		return
+	}
+	_ = conn.SetDeadline(s.opts.Expires)
 
 	// The host's prompt goes away when the phone leaves or the window closes.
 	decide, stop := context.WithCancel(s.window)
@@ -273,7 +287,12 @@ func pairOn(conn net.Conn, opts PhoneOptions) ([]byte, error) {
 	if err != nil {
 		return nil, ErrFailed
 	}
-	if err := writeLine(conn, map[string]any{"device": connectinvite.CleanName(opts.Device), "publicKey": base64.StdEncoding.EncodeToString(own.Public[:]), "v": wireVersion}); err != nil {
+	nonce, err := NewNonce()
+	if err != nil {
+		return nil, ErrFailed
+	}
+	commit := Commit(opts.Label, own.Public[:], nonce)
+	if err := writeLine(conn, map[string]any{"commit": base64.StdEncoding.EncodeToString(commit[:]), "device": connectinvite.CleanName(opts.Device), "v": wireVersion}); err != nil {
 		return nil, mapNetErr(err)
 	}
 	reader := bufio.NewReaderSize(conn, MaxLine+1)
@@ -281,13 +300,17 @@ func pairOn(conn net.Conn, opts PhoneOptions) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	hostKey, err := base64.StdEncoding.DecodeString(hostHello.PublicKey)
-	if err != nil || len(hostKey) != 32 {
+	hostKey, ok := decode32(hostHello.PublicKey)
+	if !ok || hostHello.Status != "" {
 		return nil, ErrFailed
 	}
-	session, err := NewSession(opts.Label, own, hostKey, true)
+	session, err := NewSession(opts.Label, own, hostKey, true, nonce)
 	if err != nil {
 		return nil, ErrFailed
+	}
+	// Only now, with the host bound to hostKey, the phone reveals what it committed to.
+	if err := writeLine(conn, map[string]any{"nonce": base64.StdEncoding.EncodeToString(nonce), "publicKey": base64.StdEncoding.EncodeToString(own.Public[:]), "v": wireVersion}); err != nil {
+		return nil, mapNetErr(err)
 	}
 	if opts.OnCode != nil {
 		opts.OnCode(session.Code)
@@ -325,7 +348,7 @@ func readMessage(r *bufio.Reader) (message, error) {
 		return message{}, mapNetErr(err)
 	}
 	var m message
-	if json.Unmarshal(line, &m) != nil || m.V != wireVersion {
+	if decodeStrict(line, &m) != nil || m.V != wireVersion {
 		return message{}, ErrFailed
 	}
 	if m.Status == "denied" {
@@ -356,6 +379,37 @@ func readLine(r *bufio.Reader) ([]byte, error) {
 		return nil, err
 	}
 	return append([]byte{}, line[:len(line)-1]...), nil
+}
+
+// readStrict reads one line into v with decodeStrict.
+func readStrict(r *bufio.Reader, v any) error {
+	line, err := readLine(r)
+	if err != nil {
+		return err
+	}
+	return decodeStrict(line, v)
+}
+
+// decodeStrict decodes exactly one JSON object with no fields beyond v's.
+func decodeStrict(line []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(line))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if dec.More() {
+		return errors.New("trailing data")
+	}
+	return nil
+}
+
+// decode32 decodes canonical standard base64 of exactly 32 bytes.
+func decode32(s string) ([]byte, bool) {
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil || len(b) != 32 || base64.StdEncoding.EncodeToString(b) != s {
+		return nil, false
+	}
+	return b, true
 }
 
 // writeLine writes v as one JSON line; encoding/json sorts map keys, as the wire format requires.

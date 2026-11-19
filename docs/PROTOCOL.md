@@ -83,30 +83,67 @@ key, so the host maps it back to the key. The helper's `identifyPhone` option wr
 
 ## Same-Wi-Fi delivery
 
-The host advertises `<instance>.<service>.local` (for example `_myapp._tcp`, TXT `v=1`) on a TCP
-port bound to its private IPv4 LAN addresses, and accepts only peers on the same subnet. One phone
-at a time:
+The host advertises `<instance>.<service>.local` (for example `_myapp._tcp`, TXT `v=2`; the TXT
+value is the Bonjour record's, not the wire version below) on a TCP port bound to its private IPv4
+LAN addresses, and accepts only peers on the same subnet. One phone at a time. Wire version 2
+(v0.3); the uncommitted v1 exchange is gone.
 
-1. phone → host: `{"v":1,"publicKey":"<base64 X25519>","device":"Pixel 9"}`
-2. host → phone: `{"v":1,"publicKey":"<base64 X25519>"}`
-3. Both sides compute:
+Messages are one JSON object per line (`\n`-terminated, at most 4096 bytes, sorted keys, no other
+fields). `b64(x)` is standard base64 with padding; every binary field is exactly 32 bytes (44
+characters). `label` is the label's UTF-8 bytes; `‖` is concatenation; string literals are ASCII.
+
+1. phone → host, the commitment, before the phone has seen any host key:
+
+   ```
+   nonce  = 32 random bytes (fresh per attempt, like phonePriv)
+   commit = SHA256(label ‖ "commit" ‖ phonePub(32) ‖ nonce(32))
+   {"commit":"<b64(commit)>","device":"Pixel 9","v":2}
+   ```
+
+2. host → phone: `{"publicKey":"<b64(hostPub)>","v":2}` (a fresh X25519 key per attempt).
+3. phone → host, the reveal: `{"nonce":"<b64(nonce)>","publicKey":"<b64(phonePub)>","v":2}`. The host
+   recomputes `commit` from these and closes the connection if it differs.
+4. Both sides compute:
 
    ```
    shared = X25519(own private, peer public)
-   code   = "%06d" of uint64_be(SHA256(label ‖ phonePub ‖ hostPub ‖ shared)[0:8]) mod 1_000_000
-   key    = HKDF-SHA256(ikm = shared, salt = phonePub ‖ hostPub, info = label ‖ " invitation", 32 bytes)
+   commit = SHA256(label ‖ "commit" ‖ phonePub ‖ nonce)                       (as in step 1)
+   code   = "%06d" of uint64_be(SHA256(label ‖ "code" ‖ commit ‖ phonePub ‖ hostPub ‖ nonce ‖ shared)[0:8]) mod 1_000_000
+   key    = HKDF-SHA256(ikm = shared, salt = commit ‖ phonePub ‖ hostPub ‖ nonce (128 bytes), info = label ‖ " invitation", 32 bytes)
    ```
 
    The phone shows `code`; the computer shows it too and asks its user to approve.
-4. host → phone: `{"v":1,"status":"approved","sealed":"<base64 nonce(12) ‖ ChaCha20-Poly1305(key, invite JSON) ‖ tag>"}`,
-   or `{"v":1,"status":"denied","reason":"…"}`.
+5. host → phone: `{"sealed":"<b64(aeadNonce(12) ‖ ChaCha20-Poly1305(key, aeadNonce, invite JSON) ‖ tag(16))>","status":"approved","v":2}`,
+   or `{"status":"denied","v":2}` / `{"reason":"expired","status":"denied","v":2}`. A host busy with
+   another phone, or whose window closed, sends the denial at once instead of step 2.
 
-Messages are one JSON object per line. The default label is `tailpocket-local-pairing-v1`;
-a phone and a host interoperate only with the same label. The phone then pairs with the decrypted
-invite as above.
+Fail closed: a malformed or oversized line, a `v` other than 2 (v1 included), a field that is
+missing, unknown or not canonical 32-byte base64, a low-order key, a reveal that does not match the
+commitment, or no commitment or reveal within the host's hello timeout (5 s each) closes the
+connection without a reply; the host's user sees no code. The phone likewise gives up on any host
+line that is not v2 and never reveals to a host whose key it could not use. There is no fallback to
+v1.
+
+Frozen vector (label `dsh-mobile-local-pairing-v1`, phone private 32×`0x11`, host private
+32×`0x22`, nonce 32×`0x44`, AEAD nonce 12×`0x33`, plaintext `{"version":3}`), all base64:
+phonePub `e06Qm75//kTEZaIgA31gjuNYl9Me+XLwf3SJLLD3PxM=`, hostPub
+`D6poTtKIZ7l/Smot7l34zpdOdrcBjj8iocTPJnhXDyA=`, commit `HnYkDXyQsAK46/99Ac05tBezHWWwGBiGq+FIYIScHcM=`,
+code `933437`, key `t//rOgjEARsMhj83BfiVqop/eRbw1t00Z3fyQL4UzPs=`, sealed
+`MzMzMzMzMzMzMzMzZK3iZP3rpvoh+Bk9sxZNBMqdAxZYW+EfL0AKpog=` (`connectlocal` `TestFrozenVectorWithDSHLabel`).
+
+The default label is `tailpocket-local-pairing-v1`; a phone and a host interoperate only with the
+same label. The phone then pairs with the decrypted invite as above. DSH Mobile shares this protocol
+with its own label and must move to wire v2 at the same time, with this vector replacing the v1 one
+(code `295936`) in its `docs/TAILCAT.md`: a v2 host refuses its v1 phones and a v2 phone its v1
+hosts.
 
 The code is what stops a neighbour on the same Wi-Fi from receiving the invite: they would need the
-user to approve a code their phone did not show.
+user to approve a code their phone did not show. The commitment is what makes the code worth
+checking against a machine in the middle: whichever side it answers second, its input to that side's
+code is fixed before it learns the other side's (the phone is bound by `commit` before it sees
+`hostPub`; the host picks `hostPub` before the reveal), so it cannot search for keys that make both
+codes equal. Each attempt makes them equal with probability 10^-6 and costs the host's user one
+prompt with two different codes, which they deny.
 
 # v2: routes (v0.3)
 
@@ -122,6 +159,20 @@ phone and host, so a relay sees only ciphertext.
 
 Phones skip route types they do not know. A phone tries the route that worked last first, then the
 others in the host's order; each route gets at most 10 s (each lan address 3 s) while others are left.
+
+**Defaults (v0.3.0-pre.4).** With no configuration a host has Tailcat and a `lan` route: it listens
+on every private address (RFC 1918 IPv4, IPv6 ULA) of its up, non-loopback, non-point-to-point
+interfaces, at most 4, on one port in 49152–65535 derived from its Noise public key
+(`SHA-256("tailpocket lan port" || pk)`), follows address changes every 30 s and sends the new
+`routes` on every session. Such a listener closes a connection from a source that is not private,
+link-local or loopback before reading a byte. `Config.Listen` names the addresses instead;
+`NoLAN` turns the route off. Relays exist only when configured.
+
+**Tailcat only.** `Config.TailcatOnly` (helper `tailcatOnly`) runs the host as v0.2 did: no TCP
+listener at all, no relay connection, and invites and `routes` list only Tailcat; it refuses
+`Relays` or `Listen`. A phone's `Options.TailcatOnly` (mobile `SetTailcatOnly`, `tailpocket-phone
+-tailcat-only`) never dials the relay or lan routes a host lists, stores none and does not sync a
+key. Phones paired with v0.2 keep working unchanged against either.
 
 ## Keys
 
@@ -153,28 +204,63 @@ tailpocket2:<base64url, no padding, of the zlib-compressed JSON>
 Every route redeems the same window: the phone that joins first, over any route, owns it. A v1 QR
 read as v2 (`DecodeV2`) is one `tailcat` route. Treat the invite as a secret, as in v1.
 
+Every route pairs with the Noise handshake below, the `tailcat` one too: the phone opens the
+window's one-time Tailcat node (the `inv` key) and runs `TP2P` on its pairing port. That port still
+answers v1's `POST /pair` only if the host also handed out the v1 invite (`QR`, `Invite`,
+`ServeLocal`); for a window that gave out only a v2 invite it answers `403`, so its holder cannot
+skip the emoji check by taking the `inv` inside it. A connect (`TP2C`) on a pairing port is refused.
+
+### Emoji check (v0.3.0-pre.4)
+
+A v2 window needs the app's `PairOptions.Confirm` (`QR2` fails without it). After the handshake and
+the phone's hello, the host checks the window, the nodekey proof and the key rules, and then, unless
+this phone already joined (a lost reply), sends `{"type":"pending"}` and asks its user with the
+phone's name, the route and four emoji:
+
+```
+sas   = first 3 bytes of HKDF-SHA256(ikm = handshake hash, salt = none, info = "tailpocket2 sas")
+emoji = table[sas >> 18 & 63], table[sas >> 12 & 63], table[sas >> 6 & 63], table[sas & 63]
+```
+
+with the 64-entry table `connectsecure.SASEmoji`. The phone shows the same four once it reads
+`pending`, never before (a refused pairing shows none), and only if its hello said `"sas":true`; a
+host refuses a pairing phone whose hello does not. The user confirms on the computer only: the phone
+already pinned the host's key from the QR, so what the check stops is someone else who holds the QR
+pairing first, and only the computer's user sees both. A no, no answer within 55 s, or the phone
+hanging up while the question is open ends the window: show a new code. One question at a time per
+window.
+
+Why 24 bits suffice: the handshake hash covers both ephemeral keys, and the host's ephemeral key
+appears only in its reply, after the phone committed to its own; an attacker in the phone's place
+gets one try per window (the window ends on a no), with probability 2^-24 of matching the user's
+phone. The same-Wi-Fi delivery above keeps its 6-digit code behind a commitment; the emoji are not
+used there.
+
 ## Noise session
 
 - The phone dials and sends a 4-byte preamble `TP2P` (pair) or `TP2C` (connect).
 - Pair: `Noise_IKpsk2_25519_ChaChaPoly_SHA256`; connect: `Noise_IK_25519_ChaChaPoly_SHA256`; prologue
   `tailpocket2`; `github.com/flynn/noise` v1.1.0. The phone knows the host key from `pk`. Protocol
-  version 2 (v0.3.0-pre.2). Version 1 was pre.1's AES-GCM: the suites differ, so a pre.1 phone's
+  version: 3 for pairing (the emoji check, v0.3.0-pre.4), 2 for connecting (unchanged since
+  v0.3.0-pre.2, so a pre.2 or pre.3 phone connects to a pre.4 host); each side takes exactly that
+  version, and a pre.3 phone pairing at a pre.4 host gets `bye proto-mismatch`. Version 1 was pre.1's AES-GCM: the suites differ, so a pre.1 phone's
   first handshake message does not decrypt at a pre.2 host (and the reverse), the host closes the
   connection, and the phone reports handshake-closed and tries its other routes, Tailcat among them.
   No `bye` is sent in that case; `bye proto-mismatch` is for a peer that speaks this suite with
   another `proto`.
 - psk = `SHA-256("tailpocket2 psk" || code)`; cid = `base64url(SHA-256("tailpocket2 cid" || code)[:12])`.
 - Handshake messages and records carry a 2-byte big-endian length. The first message's payload is
-  `{"proto":2,"cid":"…"}` (pair) or `{"proto":2}`; nothing else, since it has no forward secrecy.
-- After the handshake the phone sends `{"type":"hello","proto":2,"version":"…","phone":"nodekey:…"}`.
-  Pairing adds `"device"` and `"proof"`: base64url of HMAC-SHA256 keyed with X25519(the nodekey's
+  `{"proto":3,"cid":"…"}` (pair) or `{"proto":2}`; nothing else, since it has no forward secrecy.
+- After the handshake the phone sends `{"type":"hello","proto":2,"version":"…","phone":"nodekey:…"}`
+  (`proto` as in the first message). Pairing adds `"device"`, `"sas":true` and `"proof"`: base64url of HMAC-SHA256 keyed with X25519(the nodekey's
   private key, the host's Noise key) over `"tailpocket2 pair"`, a zero byte and the handshake hash
   (`connectsecure.KeyProof`). The host computes the same with its Noise private key and the named
-  nodekey, and turns a pairing without it away with `bye denied`: over relay and lan, holding an
-  invite does not let anyone pair under another phone's nodekey (Tailcat pairing: see "Pairing
-  request"). The host decides only then; turning a phone away, it sends one `bye` and
+  nodekey, and turns a pairing without it away with `bye denied`: on every route, holding an
+  invite does not let anyone pair under another phone's nodekey (v1's `/pair`: see "Pairing
+  request"). The host decides only then (after the emoji check when pairing); turning a phone away, it sends one `bye` and
   nothing else. Admitted, it sends its own `hello`, and when pairing `{"type":"paired","phone","name","payload"}`.
-- Limits: 5 s for the preamble and first message, 10 s to the decision, 16 handshakes at once per
+- Limits: 5 s for the preamble and first message, 10 s to the decision (pairing: 60 s more for the
+  emoji check), 16 handshakes at once per
   route (each relay and each lan address has its own) and 4 per source address on a lan route, 4
   sessions per phone (a fifth closes the oldest with `bye busy`).
 - Records: `[stream u32][type u8][len u16][payload]`, types `open`, `data`, `close`, `window`,
@@ -241,6 +327,11 @@ that already terminate their own pinned TLS end to end. The host cannot tell whi
 phone a connection is from (`PhoneOf` is `""`), so the app authenticates it; Authorize and the
 audit's phone field do not apply. Phones do not pair over opaque routes.
 
+Anyone who knows the room reaches the app's port through an opaque relay. An app that configures
+one MUST authenticate every connection itself (for example pinned TLS plus a per-device bearer, as
+DSH does) and MUST declare it with `Relay.AppAuth` (helper `appAuth`); `connecthost.New` and the
+helper refuse an opaque relay without it.
+
 ## Phones paired before v0.3: key sync
 
 The main Tailcat node also serves virtual port 48933, for paired phones only:
@@ -262,8 +353,9 @@ Authorize turns away, gets its connection closed. After one sync an old link car
 and uses every route; there is no new QR. A host before v0.3 does not serve the port, and the phone
 keeps using Tailcat.
 
-A v0.3 phone that pairs over Tailcat from a v2 invite syncs right after pairing; if that fails it
-keeps a Tailcat-only link and syncs on a later connection.
+A v0.3.0-pre.4 phone pairing from a v2 invite over Tailcat runs the Noise pairing in the window,
+which records its key with the nodekey proof; it does not need a sync. (pre.3 phones paired over
+v1's `/pair` and synced right after.)
 
 An app that served phones over its own unencrypted local port before v0.3 closes that port when
 every phone that used it has a key in `State.Keys`, or 3 days after the upgrade, whichever comes
@@ -297,8 +389,9 @@ sync. A phone paired on v0.3 never uses an unencrypted port.
    its token within 10 s (else 4408), and the relay copies binary messages both ways. Either side
    ending closes the other with 1001 `peer-gone`; close codes are never forwarded.
 4. Limits: 100 rooms, 16 phones per room, 4 per source address, 30 `/v1/phone` per address per
-   minute, 64 KiB per message, 4096 TCP connections (64 per address). The relay refuses to start
-   without a token unless `--open`.
+   minute, 30 `/v1/host` and `/v1/accept` together per address per minute (before the token check),
+   64 KiB per message, 4096 TCP connections (64 per address). The relay does not start without a
+   token, and refuses CONNECT, absolute-form and `OPTIONS *` requests with 400.
 
 ## Revoking
 

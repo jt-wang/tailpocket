@@ -53,6 +53,9 @@ type Timing struct {
 	// came in for as long again, end the session with ErrStalled. Default 3 s. It finds a path that
 	// went silent (Wi-Fi gone without a reset) within 2×Stall instead of Idle or TCP's timeout.
 	Stall time.Duration
+	// Confirm (pairing only) is how long the host's user has to compare the emoji and decide; both
+	// sides allow it on top of Handshake. Default 60 s.
+	Confirm time.Duration
 }
 
 const (
@@ -62,6 +65,7 @@ const (
 	defaultIdle      = 60 * time.Second
 	defaultWrite     = 60 * time.Second
 	defaultStall     = 3 * time.Second
+	defaultConfirm   = 60 * time.Second
 	closeGrace       = time.Second // Session.Close waits this long for its bye to go out
 	maxDeviceName    = 64          // bytes of the phone's name the host keeps
 )
@@ -78,6 +82,7 @@ func (t Timing) withDefaults() Timing {
 	def(&t.Idle, defaultIdle)
 	def(&t.Write, defaultWrite)
 	def(&t.Stall, defaultStall)
+	def(&t.Confirm, defaultConfirm)
 	return t
 }
 
@@ -91,7 +96,12 @@ type ClientConfig struct {
 	Phone   string      // the phone's id on the host (TailPocket: its "nodekey:…"), sent in hello
 	// Prove, when set, proves Phone in the hello: it gets the handshake hash and returns what the host
 	// checks (TailPocket: KeyProof with the nodekey's private key).
-	Prove  func(binding []byte) ([]byte, error)
+	Prove func(binding []byte) ([]byte, error)
+	// OnSAS (pairing only) gets the four emoji of this handshake (SASText) when the host says it
+	// waits for its user (Peer.Pending), for the phone to show while the user compares them with the
+	// computer's. The hello tells the host the phone shows them; a host that asks for the check
+	// refuses a pairing phone without OnSAS.
+	OnSAS  func(emoji []string)
 	Timing Timing
 
 	proto int // 0 means Proto; tests set another value
@@ -107,6 +117,14 @@ type Peer struct {
 	Phone  string   // the id the phone says it has, from the hello; the host checks it
 	// Binding is this session's handshake hash; Proof is what the phone's Prove returned for it.
 	Binding, Proof []byte
+	// SAS (pair mode only): the phone says it shows the emoji of SAS(Binding).
+	SAS bool
+	// Pending (pair mode only) tells the phone, encrypted, that the host now waits for its user to
+	// compare the emoji; the phone shows them only then. Admit calls it at most once, before waiting.
+	Pending func() error
+	// Gone (pair mode only) is closed when the phone hangs up or its connection breaks while Admit
+	// waits, so a pairing the phone gave up on ends there.
+	Gone <-chan struct{}
 }
 
 // Admission is what Admit decided. With OK false Accept sends bye{Bye} and
@@ -165,9 +183,16 @@ func (l *Limiter) acquire() bool {
 
 func (l *Limiter) release() { <-l.slots }
 
-// Proto is the only protocol version this package speaks. 2: ChaChaPoly, rekey frames and the
-// pairing proof (v0.3.0-pre.2); 1 was v0.3.0-pre.1 (AESGCM), which no release shipped.
-const Proto = 2
+// Proto is the pairing protocol version. 3: pairing shows emoji and may wait for the host's user (a
+// pending message; v0.3.0-pre.4). 2: ChaChaPoly, rekey frames and the pairing proof (v0.3.0-pre.2).
+// 1 was v0.3.0-pre.1 (AESGCM), which no release shipped.
+//
+// ConnectProto is the version a paired phone connects with. Connecting did not change in 3, so it
+// stays 2: phones and hosts from pre.2 on connect to each other. Each side takes exactly its version.
+const (
+	Proto        = 3
+	ConnectProto = 2
+)
 
 const prologue = "tailpocket2"
 

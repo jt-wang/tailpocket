@@ -94,6 +94,9 @@ func (a *advertiser) serve() {
 			index = cm.IfIndex
 			ips = a.byIndex[index]
 		}
+		if !a.onLink(from.IP, index) {
+			continue
+		}
 		if ips == nil {
 			ips = a.allIPs()
 		}
@@ -107,6 +110,25 @@ func (a *advertiser) serve() {
 			_ = a.write(reply, &net.UDPAddr{IP: group, Port: mdnsPort}, index)
 		}
 	}
+}
+
+// onLink reports whether src is on a network of the interface the packet came in on (index 0: of
+// any interface served). RFC 6762 section 11: a responder ignores queries from off the local link,
+// so it does not answer the internet (a computer with a public address, or UDP 5353 forwarded to
+// it) with its LAN addresses, or reflect a small query as a bigger answer. Loopback is no
+// interface served, so a query from 127.0.0.1 gets nothing either.
+func (a *advertiser) onLink(src net.IP, index int) bool {
+	for _, i := range a.ifaces {
+		if index != 0 && i.Interface.Index != index {
+			continue
+		}
+		for _, n := range i.Networks {
+			if n.Contains(src) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *advertiser) allIPs() []net.IP {

@@ -11,7 +11,7 @@ import kotlinx.coroutines.launch
 
 /**
  * Registers every bridge function on an NshView, so the NSH app calls them with
- * `host.call('tailPocket.pair', {...})` (see sdk/js/client.ts) and receives `tailPocket.nearby` events.
+ * `host.call('tailPocket.pair', {...})` (see sdk/js/client.ts) and receives `tailPocket.nearby` and `tailPocket.pair.emoji` events.
  *
  *     TailPocketNsh.attach(view, lifecycleScope)
  */

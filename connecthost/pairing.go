@@ -1,9 +1,11 @@
 package connecthost
 
 import (
+	"bufio"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -31,6 +33,17 @@ type Phone struct {
 	Route  string // the route it pairs over: RouteTailcat, RouteRelay or RouteLAN
 }
 
+// PairRequest is a phone asking to pair, for PairOptions.Confirm.
+type PairRequest struct {
+	Phone  string // "nodekey:…"
+	Device string // the name the phone gave, cleaned
+	Route  string // RouteTailcat, RouteRelay or RouteLAN
+	// Emoji are the four the phone shows (connectsecure.SASText). Show them with Device and ask the
+	// user whether the phone shows the same. Nil for a phone pairing with a v1 invite (QR, Invite,
+	// ServeLocal): an app before v0.3 shows none, so the user can only go by the name.
+	Emoji []string
+}
+
 type PairOptions struct {
 	// TTL bounds the window (default 2 minutes, at most 15).
 	TTL time.Duration
@@ -38,13 +51,23 @@ type PairOptions struct {
 	// with the reply inside the tunnel. It runs once per window. Nil sends no payload. An error
 	// refuses the phone: this is where an app checks a pairing, for example the route it came over.
 	Payload func(Phone) (string, error)
+	// Confirm asks the computer's user to let a phone pair. It is required for v2 invites (QR2,
+	// InviteV2): every pairing with one shows emoji on both screens and waits for this answer, over any
+	// route. With a v1 invite it is optional and gets no emoji. It runs at most once at a time per
+	// window; ctx ends when the phone gives up, the window closes or ConfirmTimeout passes. A false,
+	// a timeout or a phone that goes away ends the window: show a new code to try again.
+	Confirm func(ctx context.Context, req PairRequest) bool
 }
+
+// ConfirmTimeout is how long Confirm has.
+const ConfirmTimeout = 55 * time.Second
 
 // Pairing is one open window. One phone can join it.
 type Pairing struct {
 	h       *Host
 	inv     connectinvite.Invite
 	payload func(Phone) (string, error)
+	confirm func(context.Context, PairRequest) bool
 	expires time.Time
 	node    node
 	server  *http.Server
@@ -53,11 +76,15 @@ type Pairing struct {
 	code string // the v2 pairing code; its cid names this window on the encrypted routes
 	cid  string
 
-	mu    sync.Mutex
-	bound string
-	noise *[32]byte // the Noise key the bound phone brought, if any
-	reply *pairReply
-	phone Phone
+	limit *connectsecure.Limiter // Noise pairings over the Tailcat window
+
+	mu      sync.Mutex
+	v1      bool // a v1 invite left the host (QR, Invite, ServeLocal): /pair over Tailcat is open
+	waiting bool // Confirm is running
+	bound   string
+	noise   *[32]byte // the Noise key the bound phone brought, if any
+	reply   *pairReply
+	phone   Phone
 
 	joined   chan struct{}
 	ended    chan struct{}
@@ -105,7 +132,8 @@ func (h *Host) Pair(ctx context.Context, opts PairOptions) (*Pairing, error) {
 	clientText, _ := client.MarshalText()
 	expires := time.Now().Add(ttl)
 	code := connectinvite.NewCode()
-	p := &Pairing{h: h, payload: opts.Payload, expires: expires, ln: newChanListener(),
+	p := &Pairing{h: h, payload: opts.Payload, confirm: opts.Confirm, expires: expires, ln: newChanListener(),
+		limit:  connectsecure.NewLimiter(4),
 		joined: make(chan struct{}), ended: make(chan struct{}), code: code, cid: connectsecure.CIDFor(code)}
 	h.op.Lock()
 	err := h.flushLocked() // the v2 invite carries the host's Noise key: it must be saved first
@@ -120,7 +148,7 @@ func (h *Host) Pair(ctx context.Context, opts PairOptions) (*Pairing, error) {
 			if port != h.pairingPort {
 				return nil
 			}
-			return func(c netConn) { p.ln.offer(c) }
+			return p.servePairingConn
 		}})
 	if err != nil {
 		return nil, err
@@ -158,16 +186,33 @@ func (p *Pairing) InviteV2() connectinvite.V2 {
 		PK: encodeKey(pk), PSK: p.code, Via: via}
 }
 
-// QR2 is InviteV2 as text for a QR code or link, e.g. with connectinvite.DefaultPrefix2.
+// QR2 is InviteV2 as text for a QR code or link, e.g. with connectinvite.DefaultPrefix2. It needs
+// PairOptions.Confirm.
 func (p *Pairing) QR2(prefix string) (string, error) {
+	if p.confirm == nil {
+		return "", ErrNoConfirm
+	}
 	return connectinvite.EncodeV2(p.InviteV2(), prefix)
 }
 
-// Invite is what the phone needs; holding it lets a phone pair until it expires.
-func (p *Pairing) Invite() connectinvite.Invite { return p.inv }
+// ErrNoConfirm: a v2 invite was asked for a window without PairOptions.Confirm.
+var ErrNoConfirm = errors.New("connecthost: v2 invites need PairOptions.Confirm")
 
-// QR is the invite as text for a QR code or link, e.g. with connectinvite.DefaultPrefix.
-func (p *Pairing) QR(prefix string) (string, error) { return connectinvite.Encode(p.inv, prefix) }
+// Invite is the v1 invite, for apps before v0.3; holding it lets a phone pair until it expires.
+// Handing it out (Invite, QR, ServeLocal) opens /pair on the Tailcat window, which shows no emoji.
+func (p *Pairing) Invite() connectinvite.Invite { p.openV1(); return p.inv }
+
+// QR is the v1 invite as text for a QR code or link, e.g. with connectinvite.DefaultPrefix.
+func (p *Pairing) QR(prefix string) (string, error) {
+	p.openV1()
+	return connectinvite.Encode(p.inv, prefix)
+}
+
+func (p *Pairing) openV1() {
+	p.mu.Lock()
+	p.v1 = true
+	p.mu.Unlock()
+}
 
 // Expires is when the window closes.
 func (p *Pairing) Expires() time.Time { return p.expires }
@@ -252,6 +297,20 @@ func (p *Pairing) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	p.mu.Lock()
+	v1 := p.v1
+	p.mu.Unlock()
+	if !v1 {
+		// Only a v2 invite left the host: its holder pairs with the Noise handshake and the emoji, not
+		// with the Tailcat window inside it.
+		p.h.record(Event{Kind: EventDenied, Phone: k.String(), Route: RouteTailcat, Reason: "v1-not-offered"})
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if !p.confirmed(r.Context(), k, req.Device, RouteTailcat, nil) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 	// The pairing node admits the invite's one-time key, so phoneKey is only a claim here: no Noise
 	// key is taken with it (pre.2 phones still send one; it is ignored). The phone registers its key
 	// with Sync on the main node, where WireGuard proves the nodekey.
@@ -309,3 +368,70 @@ func (p *Pairing) join(ctx context.Context, k key.NodePublic, device, route stri
 	}
 	return p.reply, http.StatusOK
 }
+
+// confirmed asks Confirm about phone k, unless the window has none or already took this phone (a
+// lost reply). A no, a timeout, or the phone going away ends the window.
+func (p *Pairing) confirmed(ctx context.Context, k key.NodePublic, device, route string, emoji []string) bool {
+	if p.confirm == nil {
+		return true
+	}
+	p.mu.Lock()
+	if p.bound == k.String() {
+		p.mu.Unlock()
+		return true
+	}
+	if p.waiting || p.bound != "" {
+		p.mu.Unlock()
+		return false
+	}
+	p.waiting = true
+	p.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, ConfirmTimeout)
+	defer cancel()
+	go func() {
+		select {
+		case <-p.ended:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	name := connectinvite.CleanName(device)
+	if name == "" {
+		name = "Phone"
+	}
+	ok := p.confirm(ctx, PairRequest{Phone: k.String(), Device: name, Route: route, Emoji: emoji}) && ctx.Err() == nil
+	p.mu.Lock()
+	p.waiting = false
+	p.mu.Unlock()
+	if !ok {
+		p.h.record(Event{Kind: EventDenied, Phone: k.String(), Route: route, Reason: "not-confirmed"})
+		p.Close() // a no, a timeout or a phone gone: this code is spent
+	}
+	return ok
+}
+
+// servePairingConn takes a connection to the Tailcat window: a v2 phone's Noise pairing ("TP2P"),
+// or a v1 phone's HTTP /pair.
+func (p *Pairing) servePairingConn(c netConn) {
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	br := bufio.NewReaderSize(c, 512)
+	head, err := br.Peek(4)
+	_ = c.SetReadDeadline(time.Time{})
+	if err != nil {
+		_ = c.Close()
+		return
+	}
+	pc := &peekedConn{netConn: c, r: br}
+	if string(head) == "TP2P" {
+		go p.h.servePairing(pc, p.limit)
+		return
+	}
+	p.ln.offer(pc)
+}
+
+type peekedConn struct {
+	netConn
+	r *bufio.Reader
+}
+
+func (c *peekedConn) Read(b []byte) (int, error) { return c.r.Read(b) }

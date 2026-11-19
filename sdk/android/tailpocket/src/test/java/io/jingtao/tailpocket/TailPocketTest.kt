@@ -8,14 +8,19 @@ import org.junit.Test
 
 /** JVM tests with a fake native layer (the Go library is Android-only). */
 class TailPocketTest {
-    private class FakeNative(val pairResult: String = """{"error":"expired"}""") : TailPocketNative {
+    private class FakeNative(
+        val pairResult: String = """{"error":"expired"}""",
+        /** What pair2 returns first: a link, an error, or {"emoji":[…]} with [finishResult] from pair2Finish. */
+        val pair2Result: String? = null,
+        val finishResult: String = """{"error":"unauthorized"}""",
+    ) : TailPocketNative {
         var cancelled = mutableListOf<Long>()
         override fun newKey() = "privkey:1"
         override fun publicKey(key: String) = if (key == "privkey:1") "nodekey:1" else ""
         override fun decodeInvite(text: String, prefix: String) =
             if (text.startsWith(prefix)) """{"v":1,"address":"tcA","port":48932,"key":"privkey:x","proof":"p","expiresAt":9,"name":"Mac"}""" else """{"error":"invalid-invite"}"""
         override fun pair(op: Long, invite: String, key: String, device: String, derp: String, timeoutMs: Long) = pairResult
-        override fun connect(link: String, derp: String) = """{"handle":4,"port":5555}"""
+        override fun connect(link: String, derp: String) = """{"handle":4,"port":5555,"token":"TOK","base":"/_tailpocket/TOK"}"""
         override fun stop(handle: Long) {}
         override fun localPairStart(op: Long, address: String, label: String, device: String) = """{"code":"123456"}"""
         override fun localPairFinish(op: Long, timeoutMs: Long) = """{"v":1,"address":"tcB","port":48932,"key":"k","proof":"p","expiresAt":9}"""
@@ -24,10 +29,16 @@ class TailPocketTest {
         override fun decodeInvite2(text: String, prefix: String) = if (text.startsWith(prefix) || text.startsWith("tailpocket1:"))
             """{"v":2,"name":"Mac","exp":9,"via":[{"t":"relay","u":"wss://relay.example.com","r":"AAAAAAAAAAAAAAAAAAAAAA","m":"opaque"}]}""" else """{"error":"invalid-invite"}"""
         var paired2 = ""
+        var pair2Op = 0L
         override fun pair2(op: Long, invite: String, key: String, device: String, derp: String, timeoutMs: Long): String {
             paired2 = invite
-            return """{"name":"Mac","payload":"t","key":"$key","pk":"PK","via":[{"t":"relay","u":"wss://relay.example.com","r":"R"}]}"""
+            pair2Op = op
+            return pair2Result ?: """{"name":"Mac","payload":"t","key":"$key","pk":"PK","via":[{"t":"relay","u":"wss://relay.example.com","r":"R"}]}"""
         }
+        val finished = mutableListOf<Pair<Long, Long>>()
+        override fun pair2Finish(op: Long, timeoutMs: Long): String { finished += op to timeoutMs; return finishResult }
+        var tailcatOnly: Boolean? = null
+        override fun setTailcatOnly(on: Boolean) { tailcatOnly = on }
         override fun sync(handle: Long, timeoutMs: Long) = """{"address":"tcM","port":48931,"name":"Mac","key":"privkey:1","pk":"PK","via":[{"t":"relay","u":"wss://relay.example.com","r":"R"}]}"""
         override fun link(handle: Long) = sync(handle, 0)
         override fun path(handle: Long, timeoutMs: Long) = if (handle == 4L) """{"route":"relay","relay":"relay.example.com"}""" else """{"error":"revoked"}"""
@@ -60,7 +71,7 @@ class TailPocketTest {
     // A relay-only link has no Tailcat address and must not encode one; a v0.2 link reads with no key or routes.
     @Test fun v3LinkShapes() = runTest {
         val tc = TailPocket.with(FakeNative())
-        val link = tc.pair(tc.decodeInvite2("tailpocket2:x"), "privkey:1", "Pixel")
+        val link = tc.pair(tc.decodeInvite2("tailpocket2:x"), "privkey:1", "Pixel") { fail("no emoji for a link at once") }
         assertEquals("", link.address)
         assertEquals("PK", link.hostKey)
         val text = link.encode()
@@ -76,10 +87,49 @@ class TailPocketTest {
         c.close()
     }
 
+    // v0.3.0-pre.4: the emoji first, then the computer's answer for the same operation.
+    @Test fun pair2ShowsTheEmojiThenWaitsForTheComputer() = runTest {
+        val native = FakeNative(pair2Result = """{"emoji":["🐶","🌙","🍕","🔑"]}""",
+            finishResult = """{"name":"Mac","payload":"t","key":"privkey:1","pk":"PK"}""")
+        val tc = TailPocket.with(native)
+        val shown = mutableListOf<List<String>>()
+        val link = tc.pair(tc.decodeInvite2("tailpocket2:x"), "privkey:1", "Pixel", timeoutMs = 30_000) { shown += it }
+        assertEquals(listOf(listOf("🐶", "🌙", "🍕", "🔑")), shown)
+        assertEquals("PK", link.hostKey)
+        assertEquals(listOf(native.pair2Op to 90_000L), native.finished) // timeoutMs and the computer's user's minute
+    }
+
+    @Test fun pair2RefusedOnTheComputerIsUnauthorized() = runTest {
+        val native = FakeNative(pair2Result = """{"emoji":["🐶","🌙","🍕","🔑"]}""")
+        val tc = TailPocket.with(native)
+        var shown = 0
+        try { tc.pair(tc.decodeInvite2("tailpocket2:x"), "privkey:1", "Pixel") { shown++ }; fail() } catch (e: TailPocketException) { assertEquals("unauthorized", e.code) }
+        assertEquals(1, shown)
+        // An error before any emoji never calls back or waits.
+        val early = FakeNative(pair2Result = """{"error":"unreachable"}""")
+        try { TailPocket.with(early).pair(tc.decodeInvite2("tailpocket2:x"), "privkey:1", "Pixel") { fail() }; fail() } catch (e: TailPocketException) { assertEquals("unreachable", e.code) }
+        assertEquals(emptyList<Pair<Long, Long>>(), early.finished)
+    }
+
+    @Test fun onEmojiFailingCancelsThePairing() = runTest {
+        val native = FakeNative(pair2Result = """{"emoji":["🐶","🌙","🍕","🔑"]}""")
+        val tc = TailPocket.with(native)
+        try { tc.pair(tc.decodeInvite2("tailpocket2:x"), "privkey:1", "Pixel") { throw IllegalStateException("ui gone") }; fail() } catch (e: IllegalStateException) {}
+        assertEquals(listOf(native.pair2Op), native.cancelled)
+        assertEquals(emptyList<Pair<Long, Long>>(), native.finished)
+    }
+
+    @Test fun setTailcatOnlyReachesTheNativeLayer() {
+        val native = FakeNative()
+        TailPocket.with(native).setTailcatOnly(true)
+        assertEquals(true, native.tailcatOnly)
+    }
+
     @Test fun connectGivesALocalUrl() {
         val tc = TailPocket.with(FakeNative())
         val c = tc.connect(TailPocketHostLink("tcM", 48931, "Mac", null, "privkey:1"))
-        assertEquals("http://127.0.0.1:5555", c.baseUrl)
+        assertEquals("http://127.0.0.1:5555/_tailpocket/TOK", c.baseUrl)
+        assertEquals("TOK", c.token)
         c.close()
     }
 

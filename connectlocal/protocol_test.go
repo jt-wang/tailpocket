@@ -3,6 +3,7 @@ package connectlocal
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"net"
 	"strings"
@@ -194,5 +195,141 @@ func TestServeRejectsNoBindings(t *testing.T) {
 		Bindings: []Binding{}, Confirm: func(context.Context, string, string) bool { return true }})
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// expectClosed reads from c and fails unless the host closes without sending a line.
+func expectClosed(t *testing.T, r *bufio.Reader, what string) {
+	t.Helper()
+	line, err := r.ReadString('\n')
+	if err == nil || line != "" {
+		t.Fatalf("%s: host answered %q (%v) instead of closing", what, line, err)
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("%s: host kept the connection open", what)
+	}
+}
+
+func dialRaw(t *testing.T, addr string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+	return c, bufio.NewReader(c)
+}
+
+func TestHostRejectsV1HelloAndMalformedHellos(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var prompts atomic.Int32
+	s := serve(t, ctx, HostOptions{Plaintext: []byte("ok"), Confirm: func(context.Context, string, string) bool { prompts.Add(1); return true }})
+	addr := s.addr(t)
+	commit := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	for name, hello := range map[string]string{
+		// A v1 phone (the DSH v1 frozen vector's phone key): no fallback to the uncommitted exchange.
+		"v1":             `{"device":"Pixel","publicKey":"e06Qm75//kTEZaIgA31gjuNYl9Me+XLwf3SJLLD3PxM=","v":1}`,
+		"v1 with commit": `{"commit":"` + commit + `","device":"Pixel","v":1}`,
+		"v3":             `{"commit":"` + commit + `","device":"Pixel","v":3}`,
+		"no version":     `{"commit":"` + commit + `","device":"Pixel"}`,
+		"extra field":    `{"commit":"` + commit + `","device":"Pixel","publicKey":"e06Qm75//kTEZaIgA31gjuNYl9Me+XLwf3SJLLD3PxM=","v":2}`,
+		"short commit":   `{"commit":"AAAA","device":"Pixel","v":2}`,
+		"not json":       `v=2 commit`,
+		"trailing data":  `{"commit":"` + commit + `","device":"Pixel","v":2} {}`,
+	} {
+		c, r := dialRaw(t, addr)
+		_, _ = c.Write([]byte(hello + "\n"))
+		expectClosed(t, r, name)
+	}
+	if prompts.Load() != 0 {
+		t.Fatal("the host's user was prompted")
+	}
+	if _, err := Pair(ctx, addr, PhoneOptions{Label: DefaultLabel, Device: "x"}); err != nil {
+		t.Fatalf("a v2 phone after the rejected ones: %v", err)
+	}
+}
+
+func TestHostDropsBadReveals(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var prompts atomic.Int32
+	s := serve(t, ctx, HostOptions{Plaintext: []byte("ok"), HelloTimeout: 300 * time.Millisecond,
+		Confirm: func(context.Context, string, string) bool { prompts.Add(1); return true }})
+	addr := s.addr(t)
+	kp, _ := NewKeyPair()
+	other, _ := NewKeyPair()
+	nonce, _ := NewNonce()
+	commit := Commit(DefaultLabel, kp.Public[:], nonce)
+	enc := base64.StdEncoding.EncodeToString
+	reveal := func(pub, n []byte, v int) map[string]any {
+		return map[string]any{"nonce": enc(n), "publicKey": enc(pub), "v": v}
+	}
+	flipped := append([]byte{}, nonce...)
+	flipped[0] ^= 1
+	for name, msg := range map[string]map[string]any{
+		"other key":   reveal(other.Public[:], nonce, wireVersion),
+		"other nonce": reveal(kp.Public[:], flipped, wireVersion),
+		"v1 reveal":   reveal(kp.Public[:], nonce, 1),
+		"no nonce":    {"publicKey": enc(kp.Public[:]), "v": wireVersion},
+		"never sent":  nil,
+	} {
+		c, r := dialRaw(t, addr)
+		if err := writeLine(c, map[string]any{"commit": enc(commit[:]), "device": "x", "v": wireVersion}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readMessage(r); err != nil {
+			t.Fatalf("%s: host hello: %v", name, err)
+		}
+		if msg != nil {
+			_ = writeLine(c, msg)
+		}
+		expectClosed(t, r, name)
+	}
+	if prompts.Load() != 0 {
+		t.Fatal("the host's user was prompted for a reveal that does not match its commitment")
+	}
+	// The honest reveal of the same commitment is accepted: the checks above failed for their reason.
+	c, r := dialRaw(t, addr)
+	_ = writeLine(c, map[string]any{"commit": enc(commit[:]), "device": "x", "v": wireVersion})
+	if _, err := readMessage(r); err != nil {
+		t.Fatal(err)
+	}
+	_ = writeLine(c, reveal(kp.Public[:], nonce, wireVersion))
+	if m, err := readMessage(r); err != nil || m.Status != "approved" {
+		t.Fatalf("honest reveal: %+v %v", m, err)
+	}
+}
+
+func TestPhoneRejectsV1Host(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	sentAfter := make(chan string, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		r := bufio.NewReader(c)
+		_, _ = r.ReadString('\n')
+		kp, _ := NewKeyPair()
+		_ = writeLine(c, map[string]any{"publicKey": base64.StdEncoding.EncodeToString(kp.Public[:]), "v": 1})
+		_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		line, _ := r.ReadString('\n')
+		sentAfter <- line
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := Pair(ctx, ln.Addr().String(), PhoneOptions{Label: DefaultLabel, Device: "x", OnCode: func(string) { t.Error("code shown") }}); !errors.Is(err, ErrFailed) {
+		t.Fatalf("got %v", err)
+	}
+	if line := <-sentAfter; line != "" {
+		t.Fatalf("phone revealed to a v1 host: %q", line)
 	}
 }

@@ -14,7 +14,7 @@ case "$(uname -m)" in arm64) arch=arm64 ;; *) arch=amd64 ;; esac
 relay_port=$((40000 + $$ % 10000)); relay_token="relay-token-for-the-e2e-$$"
 TAILPOCKET_RELAY_TOKEN="$relay_token" "build/tailpocket-relay-darwin-$arch" --listen "127.0.0.1:$relay_port" --public-host 127.0.0.1 >/dev/null 2>&1 &
 relay=$!
-TAILPOCKET_STATE=$(mktemp) TAILPOCKET_NAME="e2e relay host" TAILPOCKET_RELAY_URL="ws://127.0.0.1:$relay_port" TAILPOCKET_RELAY_TOKEN="$relay_token" \
+TAILPOCKET_STATE=$(mktemp) TAILPOCKET_NAME="e2e relay host" TAILPOCKET_AUTO_APPROVE=1 TAILPOCKET_RELAY_URL="ws://127.0.0.1:$relay_port" TAILPOCKET_RELAY_TOKEN="$relay_token" \
   node examples/node-host/server.mjs >"$rlog" 2>&1 &
 rhost=$!
 TAILPOCKET_STATE=$(mktemp) TAILPOCKET_NAME="e2e host" node examples/node-host/server.mjs >"$log" 2>&1 &

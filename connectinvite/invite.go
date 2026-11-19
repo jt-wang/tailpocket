@@ -170,10 +170,12 @@ func ValidName(name string) bool {
 	return true
 }
 
-// CleanName makes any text a valid name: control characters removed, trimmed, cut to length.
+// CleanName makes any text a valid name: control and format characters (bidi overrides and
+// isolates, zero-width characters) and line and paragraph separators removed, trimmed, cut to length.
+// A name comes from a peer not yet authenticated and is shown in an approval prompt.
 func CleanName(name string) string {
 	name = strings.TrimSpace(strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 			return -1
 		}
 		return r

@@ -8,7 +8,8 @@
 //
 // pair and local print the Link JSON (or write it to -out with mode 0600). pair takes a v1 or a v2
 // invite. The phone key is read from -key, or created there if the file does not exist; without -key
-// a new key is used. connect prints "listening 127.0.0.1:PORT" and forwards until interrupted; dial
+// a new key is used. connect prints "listening 127.0.0.1:PORT base http://127.0.0.1:PORT/_tailpocket/TOKEN token TOKEN" and
+// forwards requests under that base (or raw connections that start with "TP-FWD TOKEN\n") until interrupted; dial
 // pipes stdin/stdout. Both write the link file back when the host sends new routes. sync registers
 // the phone's end-to-end key over Tailcat (a link from before v0.3) and writes the link file back.
 package main
@@ -28,6 +29,7 @@ import (
 
 	"github.com/jt-wang/tailpocket/connectinvite"
 	"github.com/jt-wang/tailpocket/connectphone"
+	"github.com/jt-wang/tailpocket/internal/testhook"
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
@@ -38,6 +40,8 @@ const usage = `usage:
   tailpocket-phone connect -link FILE
   tailpocket-phone dial -link FILE
   tailpocket-phone sync -link FILE
+Every command takes -tailcat-only (never the relay or local network routes), -derp-map-url URL and,
+for tests on one machine, -loopback-lan.
 `
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -59,11 +63,17 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	label := fs.String("label", "", "local pairing label")
 	linkFile := fs.String("link", "", "link file")
 	derp := fs.String("derp-map-url", "", "own relay map")
+	tailcatOnly := fs.Bool("tailcat-only", false, "use Tailcat only, never the relay or local network routes")
+	loopbackLAN := fs.Bool("loopback-lan", false, "testing: accept lan routes to loopback addresses")
 	bad := func(msg string) int { fmt.Fprintf(stderr, "%s\n%s", msg, usage); return 2 }
 	if err := fs.Parse(args[1:]); err != nil {
 		return bad(err.Error())
 	}
-	opts := connectphone.Options{Device: *device, DERPMapURL: *derp}
+	testhook.LoopbackRoutes = *loopbackLAN
+	opts := connectphone.Options{Device: *device, DERPMapURL: *derp, TailcatOnly: *tailcatOnly,
+		OnSAS: func(e []string) {
+			fmt.Fprintf(stderr, "emoji: %s (check that the computer shows the same, then confirm there)\n", strings.Join(e, " "))
+		}}
 	fail := func(err error) int { fmt.Fprintln(stderr, "error:", err); return 1 }
 
 	switch args[0] {
@@ -167,7 +177,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return fail(err)
 		}
 		defer f.Close()
-		fmt.Fprintf(stdout, "listening %s\n", f.Addr())
+		fmt.Fprintf(stdout, "listening %s base http://%s%s token %s\n", f.Addr(), f.Addr(), f.BasePath(), f.Token())
 		<-ctx.Done()
 		return 0
 	}

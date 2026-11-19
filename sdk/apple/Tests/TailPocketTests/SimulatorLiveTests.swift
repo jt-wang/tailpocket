@@ -33,7 +33,9 @@ final class SimulatorLiveTests: XCTestCase {
         let relayOnly = TailPocketInvite2(v: invite.v, name: invite.name, exp: invite.exp, pk: invite.pk, psk: invite.psk,
                                           via: invite.via.filter { $0.t == "relay" })
         XCTAssertEqual(relayOnly.via.count, 1)
-        let paired = try await TailPocket.pair(relayOnly, phoneKey: TailPocket.newKey(), device: "iOS relay")
+        var shown: [String] = []
+        let paired = try await TailPocket.pair(relayOnly, phoneKey: TailPocket.newKey(), device: "iOS relay") { shown = $0 }
+        XCTAssertEqual(shown.count, 4)
         XCTAssertEqual(paired.payload, "welcome")
         let link = TailPocketHostLink(address: "", port: 0, name: paired.name, payload: paired.payload, key: paired.key,
                                       hostKey: paired.hostKey, via: paired.via)

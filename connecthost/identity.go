@@ -52,6 +52,9 @@ func (id *identity) addSecure() bool {
 		_, id.relay, _ = ed25519.GenerateKey(rand.Reader)
 		changed = true
 	}
+	if id.noise == id.key.Raw32() {
+		panic("connecthost: the Noise key equals the Tailcat key") // crypto/rand is broken
+	}
 	return changed
 }
 
@@ -91,6 +94,11 @@ func parseIdentity(text string) (identity, error) {
 			return identity{}, bad
 		}
 		copy(id.noise[:], b)
+		// The Noise key must never be the Tailcat node key: a phone's nodekey proof computes
+		// X25519(nodekey, host Noise key), which must not be a value WireGuard computes too.
+		if id.noise == id.key.Raw32() {
+			return identity{}, bad
+		}
 	}
 	if doc.Relay != "" {
 		b, err := base64.RawURLEncoding.DecodeString(doc.Relay)

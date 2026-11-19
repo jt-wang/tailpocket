@@ -52,6 +52,7 @@ func (p *Pairing) ServeLocal(ctx context.Context, opts LocalOptions) error {
 	if advertise == nil {
 		advertise = connectmdns.Advertise
 	}
+	p.openV1() // the phone joins with the v1 invite it gets here (/pair; Confirm runs again, without emoji)
 	plaintext, err := json.Marshal(p.inv)
 	if err != nil {
 		return err
@@ -69,7 +70,7 @@ func (p *Pairing) ServeLocal(ctx context.Context, opts LocalOptions) error {
 	var advErr error
 	err = connectlocal.Serve(ctx, connectlocal.HostOptions{Label: label, Plaintext: plaintext, Expires: p.expires, Confirm: opts.Confirm,
 		Bindings: opts.Bindings, OnListening: func(port int) {
-			stop, advErr = advertise(connectmdns.Service{Instance: instance, Type: opts.Service, Port: port, TXT: []string{"v=1"}})
+			stop, advErr = advertise(connectmdns.Service{Instance: instance, Type: opts.Service, Port: port, TXT: []string{"v=2"}})
 			if advErr != nil {
 				cancel()
 			}

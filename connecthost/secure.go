@@ -59,6 +59,18 @@ type Event struct {
 	Phone  string // "nodekey:…", "" when unknown
 	Route  string
 	Reason string
+	// Dropped counts the refusals with this Reason left out since the last one reported: at most
+	// deniedPerMinute EventDenied per Reason reach Audit in a minute, so a stranger's handshakes do
+	// not flood the app's log.
+	Dropped int
+}
+
+const deniedPerMinute = 20
+
+// deniedWindow is one Reason's count of refusals in the current minute.
+type deniedWindow struct {
+	start         time.Time
+	sent, dropped int
 }
 
 func (h *Host) record(e Event) {
@@ -67,6 +79,29 @@ func (h *Host) record(e Event) {
 	}
 	if e.Time.IsZero() {
 		e.Time = time.Now()
+	}
+	if e.Kind == EventDenied {
+		h.auditMu.Lock()
+		if h.denied == nil {
+			h.denied = map[string]*deniedWindow{}
+		}
+		w := h.denied[e.Reason]
+		if w == nil || e.Time.Sub(w.start) >= time.Minute {
+			dropped := 0
+			if w != nil {
+				dropped = w.dropped
+			}
+			w = &deniedWindow{start: e.Time, dropped: dropped}
+			h.denied[e.Reason] = w
+		}
+		if w.sent >= deniedPerMinute {
+			w.dropped++
+			h.auditMu.Unlock()
+			return
+		}
+		w.sent++
+		e.Dropped, w.dropped = w.dropped, 0
+		h.auditMu.Unlock()
 	}
 	h.audit(e)
 }
@@ -156,6 +191,11 @@ func (h *Host) extraRoutesLocked() []connectinvite.Route {
 	}
 	if len(h.listen) > 0 {
 		out = append(out, connectinvite.Route{T: RouteLAN, A: slices.Clone(h.listen)})
+	}
+	if h.lan != nil {
+		if r, ok := h.lan.route(); ok {
+			out = append(out, r)
+		}
 	}
 	return out
 }
@@ -250,27 +290,52 @@ func (h *Host) acceptRoute(l routeListener) {
 	}
 }
 
+// offerOpaque hands an opaque relay connection to the app. Nothing identifies its phone, so
+// Authorize is asked with phone "" (an app that denies unknown phones denies it), and Revoke and
+// Disconnect of any phone close every open one (Config.Relay.AppAuth: the app checks the rest).
 func (h *Host) offerOpaque(c net.Conn, route string) {
-	pc := &Conn{Conn: c, Route: route, host: h}
-	h.mu.Lock()
-	if h.closed {
+	go func() {
+		if !h.authorized("", route) {
+			_ = c.Close()
+			return
+		}
+		pc := &Conn{Conn: c, Route: route, host: h}
+		h.mu.Lock()
+		if h.closed {
+			h.mu.Unlock()
+			_ = c.Close()
+			return
+		}
+		h.conns[pc] = struct{}{}
 		h.mu.Unlock()
-		_ = c.Close()
-		return
-	}
-	h.conns[pc] = struct{}{}
-	h.mu.Unlock()
-	go h.listener.offer(pc)
+		h.listener.offer(pc)
+	}()
+}
+
+// servePairing runs a Noise pairing that came over a pairing window's Tailcat node. Only pairing:
+// a connecting phone uses the main node or the other routes.
+func (h *Host) servePairing(c net.Conn, limit *connectsecure.Limiter) {
+	h.serveSession(c, RouteTailcat, limit, func() {}, true)
 }
 
 // serveSecure runs one encrypted session: handshake, admission, then every stream to the app.
 // limit is the route's handshake slots; release frees the source address's once the handshake is over.
 func (h *Host) serveSecure(c net.Conn, route string, limit *connectsecure.Limiter, release func()) {
+	h.serveSession(c, route, limit, release, false)
+}
+
+func (h *Host) serveSession(c net.Conn, route string, limit *connectsecure.Limiter, release func(), pairOnly bool) {
 	h.mu.Lock()
 	id := connectsecure.Identity{Private: h.id.noise, Public: h.id.noisePublic()}
 	h.mu.Unlock()
 	s, err := connectsecure.Accept(c, connectsecure.ServerConfig{Identity: id, PSK: h.pskFor,
-		Admit:   func(p connectsecure.Peer) (connectsecure.Admission, error) { return h.admit(p, route) },
+		Admit: func(p connectsecure.Peer) (connectsecure.Admission, error) {
+			if pairOnly && !p.Pair {
+				h.record(Event{Kind: EventDenied, Route: route, Reason: "connect-on-pairing-window"})
+				return connectsecure.Admission{Bye: "denied"}, nil
+			}
+			return h.admit(p, route)
+		},
 		Version: Version, Limit: limit})
 	release()
 	if err != nil {
@@ -375,7 +440,15 @@ func (h *Host) admit(peer connectsecure.Peer, route string) (connectsecure.Admis
 			break
 		}
 	}
+	claimed, err := parsePhone(peer.Phone)
+	stillPaired := phone == "" && err == nil && slices.Contains(h.allowed, claimed)
 	h.mu.Unlock()
+	if stillPaired {
+		// A phone the host still allows, whose Noise key it does not have (restarted without State.Keys):
+		// not "unpaired", which deletes the link. busy sends it to Tailcat, where sync restores the key.
+		h.record(Event{Kind: EventDenied, Phone: claimed.String(), Route: route, Reason: "key-unknown"})
+		return connectsecure.Admission{}, nil
+	}
 	if phone == "" || (peer.Phone != "" && peer.Phone != phone) {
 		h.record(Event{Kind: EventDenied, Route: route, Reason: "unpaired"})
 		return connectsecure.Admission{Bye: "unpaired"}, nil
@@ -414,6 +487,30 @@ func (h *Host) admitPairing(peer connectsecure.Peer, route string) (connectsecur
 	if known && !rejoin && (!hasKey || pub != peer.Static) {
 		h.record(Event{Kind: EventDenied, Phone: k.String(), Route: route, Reason: "paired-without-this-key"})
 		return denied, nil
+	}
+	// Every v2 pairing shows the emoji on both screens and waits for the computer's user. A window
+	// without Confirm (only a v1 invite was meant to leave the host) pairs nobody this way.
+	if p.confirm == nil || !peer.SAS || peer.Pending == nil {
+		h.record(Event{Kind: EventDenied, Phone: k.String(), Route: route, Reason: "no-emoji-check"})
+		return denied, nil
+	}
+	if !rejoin {
+		if err := peer.Pending(); err != nil {
+			return denied, nil
+		}
+		cctx, ccancel := context.WithCancel(context.Background())
+		go func() {
+			select {
+			case <-peer.Gone: // the phone gave up: so does the question
+				ccancel()
+			case <-cctx.Done():
+			}
+		}()
+		ok := p.confirmed(cctx, k, peer.Device, route, connectsecure.SASText(peer.Binding))
+		ccancel()
+		if !ok {
+			return denied, nil
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -472,7 +569,8 @@ type syncReply struct {
 // serveControl answers POST /v2/sync from paired phones on Tailcat: it records the phone's Noise
 // key (the connection proves the phone holds its nodekey) and returns the host's key and routes.
 func (h *Host) serveControl() {
-	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(h.handleControl),
+	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 8 << 10,
+		Handler: http.HandlerFunc(h.handleControl),
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
 			return context.WithValue(ctx, phoneCtxKey{}, PhoneOf(c))
 		}}

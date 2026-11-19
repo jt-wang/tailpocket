@@ -26,6 +26,7 @@ var (
 	ErrExpired      = errors.New("connectphone: the invite has expired")
 	ErrUnauthorized = errors.New("connectphone: the host rejected the invite")
 	ErrTaken        = errors.New("connectphone: another phone already used this invite")
+	ErrNoSAS        = errors.New("connectphone: PairV2 needs Options.OnSAS to show the pairing emoji")
 	ErrUnreachable  = errors.New("connectphone: could not reach the host")
 )
 
@@ -111,6 +112,12 @@ type Options struct {
 	HTTPClient *http.Client
 	// OnLink gets the session's Link each time the host sends new routes or Sync takes them; store it.
 	OnLink func(Link)
+	// OnSAS gets the four emoji of a v2 pairing once the computer waits for its user to compare them
+	// (connectsecure.SASText). Show them with "Check that your computer shows the same". PairV2 needs it.
+	OnSAS func(emoji []string)
+	// TailcatOnly keeps the phone on Tailcat: it never dials the relay or local network routes a host
+	// lists, and stores none (Link.Via stays empty).
+	TailcatOnly bool
 }
 
 type reply struct {

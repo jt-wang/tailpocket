@@ -164,7 +164,7 @@ func relayOnly(inv connectinvite.V2) connectinvite.V2 {
 // address taken out of its link so every Dial goes through the relay.
 func pairOverRelay(t *testing.T, h *Host, w *wire, payload string) (*connectphone.Session, connectphone.Link) {
 	t.Helper()
-	p, err := h.Pair(context.Background(), PairOptions{Payload: func(ph Phone) (string, error) {
+	p, err := h.Pair(context.Background(), PairOptions{Confirm: confirmAll, Payload: func(ph Phone) (string, error) {
 		if ph.Route != RouteRelay {
 			t.Errorf("pairing route %q", ph.Route)
 		}
@@ -176,7 +176,7 @@ func pairOverRelay(t *testing.T, h *Host, w *wire, payload string) (*connectphon
 	phoneKey := connectphone.NewKey()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	link, err := connectphone.PairV2(ctx, relayOnly(p.InviteV2()), phoneKey, connectphone.Options{Device: "Test Phone", HTTPClient: w.client()})
+	link, err := connectphone.PairV2(ctx, relayOnly(p.InviteV2()), phoneKey, connectphone.Options{OnSAS: func([]string) {}, Device: "Test Phone", HTTPClient: w.client()})
 	if err != nil {
 		t.Fatalf("pair over relay: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestPairAndConnectOverRelay(t *testing.T) {
 // visible (the recording check works), with the app's own TLS it is not.
 func TestOpaqueRelay(t *testing.T) {
 	url := startRelay(t)
-	h, _, _ := newTestHost(t, Config{Relays: []Relay{{URL: url, Token: relayToken, Opaque: true}}})
+	h, _, _ := newTestHost(t, Config{Relays: []Relay{{URL: url, Token: relayToken, Opaque: true, AppAuth: true}}})
 	waitRelay(t, h)
 	routes := h.Routes()
 	if len(routes) != 1 || routes[0].M != connectinvite.ModeOpaque {
@@ -873,7 +873,7 @@ func TestLANAttacker(t *testing.T) {
 	wifi := newTap(t, hostAddr)
 
 	// Pair and connect through the tap.
-	p, err := h.Pair(context.Background(), PairOptions{Payload: func(Phone) (string, error) { return "app-token-secret-7", nil }})
+	p, err := h.Pair(context.Background(), PairOptions{Confirm: confirmAll, Payload: func(Phone) (string, error) { return "app-token-secret-7", nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -881,7 +881,7 @@ func TestLANAttacker(t *testing.T) {
 	inv.Via = lanVia(wifi.addr)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	link, err := connectphone.PairV2(ctx, inv, connectphone.NewKey(), connectphone.Options{Device: "Test Phone"})
+	link, err := connectphone.PairV2(ctx, inv, connectphone.NewKey(), connectphone.Options{OnSAS: func([]string) {}, Device: "Test Phone"})
 	if err != nil {
 		t.Fatalf("pair over lan: %v", err)
 	}
@@ -955,7 +955,7 @@ func TestLANAttacker(t *testing.T) {
 		t.Fatalf("a replay reached the app: %d requests, had %d", app.total(), requests)
 	}
 	// A fresh window does not take the old code either: the replayed pairing names a cid no window has.
-	if _, err := h.Pair(context.Background(), PairOptions{}); err != nil {
+	if _, err := h.Pair(context.Background(), PairOptions{Confirm: confirmAll}); err != nil {
 		t.Fatal(err)
 	}
 	c, _ := net.Dial("tcp", hostAddr)
@@ -974,7 +974,7 @@ func TestLANHandshakesPerAddress(t *testing.T) {
 	hostAddr := freeAddr(t)
 	h, _, _ := newTestHost(t, Config{Listen: []string{hostAddr}})
 	serveApp(t, h)
-	p, err := h.Pair(context.Background(), PairOptions{})
+	p, err := h.Pair(context.Background(), PairOptions{Confirm: confirmAll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -982,7 +982,7 @@ func TestLANHandshakesPerAddress(t *testing.T) {
 	inv.Via = lanVia(hostAddr)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	link, err := connectphone.PairV2(ctx, inv, connectphone.NewKey(), connectphone.Options{Device: "Test Phone"})
+	link, err := connectphone.PairV2(ctx, inv, connectphone.NewKey(), connectphone.Options{OnSAS: func([]string) {}, Device: "Test Phone"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1051,3 +1051,6 @@ func TestLinkWithKeyNeverDialsAPlainRoute(t *testing.T) {
 		t.Fatalf("the phone dialled the plain address %d times", n)
 	}
 }
+
+// confirmAll is a computer's user who lets every phone pair.
+func confirmAll(context.Context, PairRequest) bool { return true }

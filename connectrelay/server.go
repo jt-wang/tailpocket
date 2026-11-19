@@ -1,6 +1,7 @@
 package connectrelay
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -13,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -24,13 +26,12 @@ import (
 
 // Config sets up a Server. Zero limits take the defaults.
 type Config struct {
-	Token            string // bearer token for /v1/host and /v1/accept
-	Open             bool   // anyone may register a room; Token is not checked
+	Token            string // required: bearer token for /v1/host and /v1/accept
 	MaxRooms         int    // default 100
 	MaxPhonesPerRoom int    // default 16
 	MaxPhonesPerAddr int    // phones per room from one source address (AddrKey), default 4
 	PhoneRate        int    // /v1/phone per source address in any 60 s, default 30
-	HostRate         int    // /v1/host per source address in any 60 s, default 30
+	HostRate         int    // /v1/host and /v1/accept together, per source address in any 60 s, default 30
 	TrustProxy       []netip.Prefix
 	PublicHost       string        // required: the relay's host name as hosts dial it (NormalizeHost); never taken from a request
 	HostGoneWait     time.Duration // after an accept connection ends, how long its phone waits to see the registration end too (then 4404, else 1001); default 1 s
@@ -66,15 +67,18 @@ const ReasonPeerGone = "peer-gone"
 // refusedLinesPerMinute bounds the refused lines written for one code.
 const refusedLinesPerMinute = 10
 
-// ErrNoToken: a relay with no token must be started open on purpose.
-var ErrNoToken = errors.New("relay: no token and not open")
+// ErrNoToken: a relay without a token would let anyone register a room, an anonymous relay for
+// any two parties, so there is none.
+var ErrNoToken = errors.New("relay: no token")
 
 // ErrNoPublicHost: the relay must know its own name to check what a
 // The host signed; the Host header is written by whoever dials, so it
 // cannot stand in.
 var ErrNoPublicHost = errors.New("relay: no public host name")
 
-// Server is the relay. It is an http.Handler.
+// Server is the relay. It is an http.Handler; an http.Server serving it should set
+// DisableGeneralOptionsHandler (else net/http answers OPTIONS * itself), MaxHeaderBytes and
+// ReadHeaderTimeout, as tailpocket-relay does.
 type Server struct {
 	cfg       Config
 	tokenH    [32]byte
@@ -95,6 +99,9 @@ type Server struct {
 	closed  bool
 	rooms   map[string]*room
 	pending int // host connections between upgrade and ready
+
+	rawMu sync.Mutex
+	raws  map[*websocket.Conn]*rawConn // each upgraded connection's TCP connection, until it closes
 
 	afterUpgrade func(path string) // tests only
 }
@@ -127,7 +134,7 @@ type waiting struct {
 
 // NewServer checks cfg and returns a relay.
 func NewServer(cfg Config) (*Server, error) {
-	if cfg.Token == "" && !cfg.Open {
+	if cfg.Token == "" {
 		return nil, ErrNoToken
 	}
 	cfg.PublicHost = NormalizeHost(cfg.PublicHost)
@@ -173,6 +180,7 @@ func NewServer(cfg Config) (*Server, error) {
 		refused:   map[refusedKey]*logWindow{},
 		perAddr:   map[netip.Addr]int{},
 		rooms:     map[string]*room{},
+		raws:      map[*websocket.Conn]*rawConn{},
 	}, nil
 }
 
@@ -200,6 +208,14 @@ func (s *Server) enter() bool {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Only origin-form requests ("GET /v1/phone?…"). net/http routes an absolute-form one
+	// ("GET http://elsewhere/v1/phone") by its path and would answer it as if it were for the
+	// relay; nothing here is a proxy, so CONNECT, absolute-form and OPTIONS * are refused outright.
+	if r.Method == http.MethodConnect || !strings.HasPrefix(r.RequestURI, "/") {
+		s.refusedWhy("", http.StatusBadRequest, "not-origin-form")
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
 	if r.URL.Path != PathHealth {
 		if !s.enter() {
 			http.Error(w, "relay stopping", http.StatusServiceUnavailable)
@@ -300,9 +316,6 @@ func (s *Server) refuse(w http.ResponseWriter, roomName string, status int, msg 
 }
 
 func (s *Server) authorized(r *http.Request) bool {
-	if s.cfg.Open {
-		return true
-	}
 	h := r.Header.Get("Authorization")
 	const p = "Bearer "
 	if len(h) < len(p) || !strings.EqualFold(h[:len(p)], p) {
@@ -338,8 +351,62 @@ func (o *owned) closeAll() {
 	}
 }
 
+// rawConn is an upgraded connection's TCP connection; closing it forgets it.
+type rawConn struct {
+	net.Conn
+	s      *Server
+	ws     *websocket.Conn
+	closed bool // guarded by s.rawMu
+}
+
+func (c *rawConn) Close() error {
+	c.s.rawMu.Lock()
+	c.closed = true
+	if c.ws != nil {
+		delete(c.s.raws, c.ws)
+	}
+	c.s.rawMu.Unlock()
+	return c.Conn.Close()
+}
+
+// hijackTap hands websocket.Accept the TCP connection as a rawConn.
+type hijackTap struct {
+	http.ResponseWriter
+	s   *Server
+	raw *rawConn
+}
+
+func (h *hijackTap) Unwrap() http.ResponseWriter { return h.ResponseWriter }
+
+func (h *hijackTap) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	c, brw, err := http.NewResponseController(h.ResponseWriter).Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	h.raw = &rawConn{Conn: c, s: h.s}
+	return h.raw, brw, nil
+}
+
+// closeMidMessage closes c with code after the relay stopped reading it partway through a
+// message. websocket's Close first reads the rest of that frame with no deadline, so a peer that
+// declared a long frame and went quiet would hold the handler, its room slot and its Listener slot
+// for good (and Server.Close with them); the deadline drops the TCP connection after closeWait.
+func (s *Server) closeMidMessage(c *websocket.Conn, code websocket.StatusCode, reason string) {
+	s.rawMu.Lock()
+	raw := s.raws[c]
+	s.rawMu.Unlock()
+	if raw != nil {
+		_ = raw.SetDeadline(time.Now().Add(closeWait))
+	}
+	c.Close(code, reason)
+}
+
+// closeWait is how long closeMidMessage lets a close handshake take.
+const closeWait = 5 * time.Second
+
 func (s *Server) upgrade(w http.ResponseWriter, r *http.Request) (*websocket.Conn, error) {
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+	tap := &hijackTap{ResponseWriter: w, s: s}
+	c, err := websocket.Accept(tap, r, &websocket.AcceptOptions{
 		// The token is a header a browser cannot set, so the origin check
 		// protects nothing here.
 		InsecureSkipVerify: true,
@@ -347,6 +414,14 @@ func (s *Server) upgrade(w http.ResponseWriter, r *http.Request) (*websocket.Con
 	})
 	if err != nil {
 		return nil, err
+	}
+	if raw := tap.raw; raw != nil {
+		s.rawMu.Lock()
+		if !raw.closed {
+			raw.ws = c
+			s.raws[c] = raw
+		}
+		s.rawMu.Unlock()
 	}
 	// The pair copier counts message bytes itself (MaxMessage); this only
 	// stops the library from reading far past that.
@@ -504,14 +579,15 @@ func (s *Server) serveHost(w http.ResponseWriter, r *http.Request) {
 	go s.keepAlive(ctx, c)
 
 	// Nothing is expected from the host; reading keeps pongs and the close
-	// handshake flowing, and tells us when it goes.
-	for {
-		if _, _, err = c.Read(ctx); err != nil {
-			break
-		}
-	}
-	code := websocket.CloseStatus(err)
+	// handshake flowing, and tells us when it goes. A message is outside the
+	// protocol, so it ends the registration rather than being skipped.
+	_, _, err = c.Read(ctx)
 	s.dropRoom(rm)
+	code := websocket.CloseStatus(err)
+	if err == nil {
+		code = websocket.StatusPolicyViolation
+		c.Close(websocket.StatusPolicyViolation, "unexpected message")
+	}
 	s.event("host-down", name, int(code), -1)
 }
 
@@ -707,6 +783,13 @@ func (s *Server) serveAccept(w http.ResponseWriter, r *http.Request) {
 		s.refuse(w, name, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
+	// The same budget as /v1/host, before the token check: guessing the token here is no faster.
+	if !s.hostRate.allow(ClientIP(r, s.cfg.TrustProxy)) {
+		s.refuse(w, name, http.StatusTooManyRequests, "too many requests")
+		return
+	}
+	// The token first: without it every room and id gets the same 401, so nothing tells a
+	// guesser whether a room or a waiting phone exists.
 	if !s.authorized(r) {
 		s.refuse(w, name, http.StatusUnauthorized, "bad or missing token")
 		return
@@ -753,6 +836,7 @@ type pairEnd struct {
 	conn    *websocket.Conn // the connection that failed or closed
 	err     error
 	tooBig  bool // conn sent a message over MaxMessage
+	notBin  bool // conn sent a text message; a pair carries binary only
 	written bool // the error came from writing to conn
 }
 
@@ -774,6 +858,10 @@ func (s *Server) splice(ctx context.Context, rm *room, phone, acc *websocket.Con
 			typ, rd, err := src.Reader(ctx)
 			if err != nil {
 				ends <- pairEnd{conn: src, err: err}
+				return
+			}
+			if typ != websocket.MessageBinary {
+				ends <- pairEnd{conn: src, notBin: true}
 				return
 			}
 			// Read the whole message before sending any of it, so an
@@ -825,7 +913,7 @@ func (s *Server) splice(ctx context.Context, rm *room, phone, acc *websocket.Con
 		return websocket.StatusGoingAway, bytesSoFar()
 	}
 
-	if end.conn == acc && !end.tooBig {
+	if end.conn == acc && !end.tooBig && !end.notBin {
 		// A the host shutting down may close the accept a moment before
 		// its registration; then the phone should learn it left (4404).
 		wait := time.NewTimer(s.cfg.HostGoneWait)
@@ -851,10 +939,14 @@ func (s *Server) splice(ctx context.Context, rm *room, phone, acc *websocket.Con
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if end.tooBig {
+		switch {
+		case end.tooBig:
 			code = websocket.StatusMessageTooBig
-			end.conn.Close(websocket.StatusMessageTooBig, "message too big")
-		} else {
+			s.closeMidMessage(end.conn, websocket.StatusMessageTooBig, "message too big")
+		case end.notBin:
+			code = websocket.StatusUnsupportedData
+			s.closeMidMessage(end.conn, websocket.StatusUnsupportedData, "binary only")
+		default:
 			end.conn.CloseNow()
 		}
 	}()

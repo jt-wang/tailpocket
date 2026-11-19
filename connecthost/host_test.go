@@ -468,7 +468,7 @@ func TestLocalPairingDeliversTheInvite(t *testing.T) {
 	case err := <-errc:
 		t.Fatal(err)
 	}
-	if svc.Type != "_tailpocket-demo._tcp" || svc.Instance != "Studio Mac" || svc.TXT[0] != "v=1" {
+	if svc.Type != "_tailpocket-demo._tcp" || svc.Instance != "Studio Mac" || svc.TXT[0] != "v=2" {
 		t.Fatalf("service %+v", svc)
 	}
 	var phoneCode string

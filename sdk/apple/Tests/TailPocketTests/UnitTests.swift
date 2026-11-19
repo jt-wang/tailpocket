@@ -50,6 +50,10 @@ final class UnitTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(TailPocketHostLink.self, from: Data(encoded.utf8)), link)
         let connection = try TailPocket.connect(link) // opens a local port, dials nothing yet
         XCTAssertEqual(try connection.currentLink(), link)
+        // The forward admits only requests under its token's prefix; appending keeps it.
+        XCTAssertFalse(connection.token.isEmpty)
+        XCTAssertEqual(connection.baseURL.absoluteString, "http://127.0.0.1:\(connection.port)/_tailpocket/\(connection.token)")
+        XCTAssertEqual(connection.baseURL.appendingPathComponent("api/info").path, "/_tailpocket/\(connection.token)/api/info")
         connection.close()
         let old = #"{"address":"tcX","port":48931,"name":"Mac","payload":"p","key":"privkey:x"}"#
         let v2 = try JSONDecoder().decode(TailPocketHostLink.self, from: Data(old.utf8))
@@ -63,10 +67,24 @@ final class UnitTests: XCTestCase {
         }
         let invite = TailPocketInvite2(v: 2, name: "Mac", exp: 1, pk: nil, psk: nil, via: [TailPocketRoute(t: "relay", u: "wss://relay.example.com", r: "AAAAAAAAAAAAAAAAAAAAAA", m: "opaque")])
         do {
-            _ = try await TailPocket.pair(invite, phoneKey: TailPocket.newKey(), device: "test")
+            _ = try await TailPocket.pair(invite, phoneKey: TailPocket.newKey(), device: "test") { _ in XCTFail("emoji for an expired invite") }
             XCTFail("paired")
         } catch {
             XCTAssertEqual(error as? TailPocketError, TailPocketError(code: "expired"))
+        }
+    }
+
+    // A phone set to Tailcat only finds nothing it may use in an invite with only a lan route: no dialing, no emoji.
+    func testTailcatOnlyPairSkipsTheLanRoute() async {
+        TailPocket.setTailcatOnly(true)
+        defer { TailPocket.setTailcatOnly(false) }
+        let invite = TailPocketInvite2(v: 2, name: "Mac", exp: 1 << 40, pk: String(repeating: "A", count: 43), psk: String(repeating: "A", count: 22),
+                                       via: [TailPocketRoute(t: "lan", a: ["192.168.1.20:7681"])])
+        do {
+            _ = try await TailPocket.pair(invite, phoneKey: TailPocket.newKey(), device: "test", timeout: 5) { _ in XCTFail("emoji without a route") }
+            XCTFail("paired")
+        } catch {
+            XCTAssertEqual(error as? TailPocketError, TailPocketError(code: "unreachable"))
         }
     }
 

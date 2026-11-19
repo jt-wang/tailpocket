@@ -113,7 +113,8 @@ public struct TailPocketPath: Codable, Sendable, Equatable {
     public let relay: String
 }
 
-/// A failure with a fixed code: invalid-invite, invalid-key, invalid-link, expired, unauthorized,
+/// A failure with a fixed code: invalid-invite, invalid-key, invalid-link, expired, unauthorized
+/// (after the pairing emoji: the computer's user said no or the code was spent; show a new code there),
 /// taken, unreachable, revoked, mismatch, handshake-closed, denied, local-failed, cancelled, timeout,
 /// unknown-handle, failed. Only "revoked" means the computer removed this phone: delete its link.
 public struct TailPocketError: Error, Equatable, Sendable, CustomStringConvertible {
@@ -123,16 +124,29 @@ public struct TailPocketError: Error, Equatable, Sendable, CustomStringConvertib
 }
 
 /// An open route to the computer: point any HTTP or WebSocket client at `baseURL`.
+///
+/// Any program on the phone can reach a loopback port, so the forward lets through only requests that
+/// carry this connection's `token`. Build every URL by appending to `baseURL`
+/// (`baseURL.appendingPathComponent("api/info")` keeps the prefix; the computer sees `/api/info`). A URL
+/// relative to "/" (`URL(string: "/api/info", relativeTo: baseURL)`) drops the prefix and gets 403.
 public final class TailPocketConnection: @unchecked Sendable {
     public let port: Int
+    /// The secret every connection to the forward presents. HTTP and WebSocket clients get it through
+    /// `baseURL` (or the header "Tailpocket-Token"); any other protocol (your own TLS) starts the
+    /// connection with the line "TP-FWD <token>\n". Keep it in memory only: do not store or log it.
+    public let token: String
+    private let base: String
     private let handle: Int64
     private let lock = NSLock()
     private var closed = false
 
-    init(handle: Int64, port: Int) { self.handle = handle; self.port = port }
+    init(handle: Int64, port: Int, token: String, base: String) {
+        self.handle = handle; self.port = port; self.token = token; self.base = base
+    }
 
-    /// http://127.0.0.1:<port> — traffic continues to the computer inside the encrypted tunnel.
-    public var baseURL: URL { URL(string: "http://127.0.0.1:\(port)")! }
+    /// http://127.0.0.1:<port>/_tailpocket/<token> — traffic continues to the computer inside the
+    /// encrypted tunnel, with the prefix removed.
+    public var baseURL: URL { URL(string: "http://127.0.0.1:\(port)\(base)")! }
 
     /// The link with the computer's latest routes; store it when it differs from the saved one.
     public func currentLink() throws -> TailPocketHostLink { try TailPocket.decode(ConnectmobileLink(handle)) }
@@ -198,15 +212,35 @@ public enum TailPocket {
         try decode(ConnectmobileDecodeInvite2(text, prefix))
     }
 
-    /// Pairs over whichever of the invite's routes works first and returns the link to store.
+    /// Pairs over whichever of the invite's routes works first and returns the link to store. Once the
+    /// computer waits for its user to compare them, `onEmoji` gets four emoji: show them with "Check that
+    /// your computer shows the same, then confirm there" and return; pairing then waits for the computer's
+    /// answer (its user has up to a minute more than `timeout`). A refusal there throws "unauthorized": ask
+    /// for a new code on the computer. A phone pairing again after a lost reply gets the link without
+    /// `onEmoji`. Cancelling the task cancels it.
     public static func pair(_ invite: TailPocketInvite2, phoneKey: String, device: String, derpMapURL: String = "",
-                            timeout: TimeInterval = 90) async throws -> TailPocketHostLink {
+                            timeout: TimeInterval = 90, onEmoji: ([String]) async -> Void) async throws -> TailPocketHostLink {
         let json = String(decoding: try JSONEncoder().encode(invite), as: UTF8.self)
         let op = Operation.next()
-        return try await blocking(cancel: { ConnectmobileCancel(op) }) {
+        let first = await blockingText(cancel: { ConnectmobileCancel(op) }) {
             ConnectmobilePair2(op, json, phoneKey, device, derpMapURL, Int(timeout * 1000))
         }
+        struct Emoji: Decodable { let emoji: [String] }
+        guard let shown = try? JSONDecoder().decode(Emoji.self, from: Data(first.utf8)) else { return try decode(first) }
+        await onEmoji(shown.emoji)
+        if Task.isCancelled {
+            ConnectmobileCancel(op)
+            throw CancellationError()
+        }
+        // The native side's own deadline (timeout and a minute, from the start) ends the wait first.
+        return try await blocking(cancel: { ConnectmobileCancel(op) }) {
+            ConnectmobilePair2Finish(op, Int((timeout + 60) * 1000))
+        }
     }
+
+    /// The phone's preference to reach computers over Tailcat only: `pair`, `connect` and `sync` then never
+    /// use the relay or local network routes a computer lists. Set it before `connect`; open connections keep theirs.
+    public static func setTailcatOnly(_ on: Bool) { ConnectmobileSetTailcatOnly(on) }
 
     /// Joins the computer's pairing window and returns the TailPocketHostLink to store. Cancelling the task cancels it.
     public static func pair(_ invite: TailPocketInvite, phoneKey: String, device: String, derpMapURL: String = "",
@@ -221,9 +255,9 @@ public enum TailPocket {
     /// Opens a local route to the computer. Nothing goes over the network until a client connects.
     public static func connect(_ link: TailPocketHostLink, derpMapURL: String = "") throws -> TailPocketConnection {
         let json = String(decoding: try JSONEncoder().encode(link), as: UTF8.self)
-        struct Opened: Decodable { let handle: Int64; let port: Int }
+        struct Opened: Decodable { let handle: Int64; let port: Int; let token: String; let base: String }
         let opened: Opened = try decode(ConnectmobileConnect(json, derpMapURL))
-        return TailPocketConnection(handle: opened.handle, port: opened.port)
+        return TailPocketConnection(handle: opened.handle, port: opened.port, token: opened.token, base: opened.base)
     }
 
     // MARK: - plumbing
@@ -240,11 +274,16 @@ public enum TailPocket {
 
     /// Runs a blocking Go call off the cooperative pool, cancelling it when the task is cancelled.
     static func blocking<T: Decodable>(cancel: @escaping @Sendable () -> Void, _ call: @escaping @Sendable () -> String) async throws -> T {
-        try await withTaskCancellationHandler {
-            let text: String = await withCheckedContinuation { continuation in
+        let text = await blockingText(cancel: cancel, call)
+        return try decode(text)
+    }
+
+    /// `blocking` without decoding the answer.
+    static func blockingText(cancel: @escaping @Sendable () -> Void, _ call: @escaping @Sendable () -> String) async -> String {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<String, Never>) in
                 DispatchQueue.global(qos: .userInitiated).async { continuation.resume(returning: call()) }
             }
-            return try decode(text)
         } onCancel: {
             cancel()
         }

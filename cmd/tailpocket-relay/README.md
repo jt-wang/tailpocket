@@ -34,7 +34,8 @@ go build -o tailpocket-relay ./cmd/tailpocket-relay
 ```
 
 **2. Make a token.** Only someone with this token can register a computer on your relay. Phones do not need it.
-The relay refuses tokens shorter than 16 bytes and warns when the file is readable by other users.
+The relay does not start without a token: one anyone could register on would carry anything between any two
+parties. It refuses tokens shorter than 16 bytes and warns when the file is readable by other users.
 
 ```sh
 openssl rand -base64 32 > relay.token && chmod 600 relay.token
@@ -114,8 +115,7 @@ The image has only the static binary (distroless) and runs as a non-root user.
 | Option | Default | What it does |
 |---|---|---|
 | `--listen ADDR` | `127.0.0.1:8080` | Address to listen on |
-| `--token-file PATH` | | File with the token, one line. Or set `TAILPOCKET_RELAY_TOKEN` |
-| `--open` | off | Anyone can register a room without a token, so anyone can also fill all `--max-rooms` rooms and lock your computer out. The relay refuses to start with no token unless this is set |
+| `--token-file PATH` | | Required, or set `TAILPOCKET_RELAY_TOKEN`: file with the token, one line |
 | `--tls-cert`, `--tls-key` | | Serve `wss://` directly. Without them it serves plain `ws://` and says so at start |
 | `--max-rooms N` | 100 | Most computers registered at once |
 | `--max-phones-per-room N` | 16 | Most phone connections per computer |
@@ -126,9 +126,14 @@ The image has only the static binary (distroless) and runs as a non-root user.
 | `--version` | | Print the version |
 
 Fixed limits: one source address may hold at most 64 TCP connections at once (a `--trust-proxy` address has no such
-limit, since it stands for many users), at most 4 of a room's phone connections, and make at most 30 the computer
-registrations in any 60 seconds. A connection over a connection limit is closed before anything is read. A source address is an IPv4 address, or an IPv6 /64. A single WebSocket message may
-be at most 1 MiB; a bigger one closes that connection before any of it is passed on. Idle HTTP connections close
+limit, since it stands for many users), at most 4 of a room's phone connections, and make at most 30 computer
+registrations and accepts together in any 60 seconds (counted before the token is checked). A connection over a connection limit is closed before anything is read. A source address is an IPv4 address, or an IPv6 /64. A single WebSocket message may
+be at most 64 KiB; a bigger one closes that connection before any of it is passed on. Phone and accept connections
+carry binary messages only. The per-address counts keep at most 65536 addresses (IPv6 /64s), at most 4096 of them
+from one IPv6 /48; past either, the address seen longest ago is forgotten and starts counting afresh, so no number
+of addresses locks a new one out. Request headers may be at most 8 KiB (431 otherwise) and must arrive within 10
+seconds. Only plain paths are served: `CONNECT`, a full URL in the request line (`GET http://…`) and `OPTIONS *` get
+400, so the relay never acts as a proxy. Idle HTTP connections close
 after 60 seconds. Refusals are logged at most 10 lines per minute for each code, then one line with how many more
 there were.
 
@@ -155,14 +160,15 @@ Close codes and HTTP answers:
 
 | Code | Meaning |
 |---|---|
-| 400 | The room or id in the URL is not 22 base64url characters |
-| 401 | Registration or accept without the right token |
+| 400 | The room or id in the URL is not 22 base64url characters (checked after the token), or the request is not for a plain path |
+| 401 | Registration or accept without the right token, whatever the room and id |
 | 404 | Accept for a phone that is not waiting (wrong id, or it gave up) |
 | 429 | Too many requests from this source address in the last 60 seconds |
 | 503 | The relay has `--max-rooms` rooms, or the room has `--max-phones-per-room` phones or 4 from this address |
 | 1001 | The other end went away (reason `peer-gone`), or the computer's accept failed |
-| 1008 | the computer did not send its registration within 10 seconds |
-| 1009 | A message was larger than 1 MiB |
+| 1003 | A text message on a phone or accept connection: they carry binary messages only, so nothing of it is passed on |
+| 1008 | the computer did not send its registration within 10 seconds, or sent a message on its registration after `ready` |
+| 1009 | A message was larger than 64 KiB |
 | 1011 | The relay could not tell the computer about the phone |
 | 4403 | The room does not come from the key, the signature is wrong, or it was signed for another host name (logged as `wrong-host`) |
 | 4404 | No computer is registered in this room (also sent when it leaves) |

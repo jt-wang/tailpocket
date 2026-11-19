@@ -15,8 +15,9 @@ func b64(t *testing.T, s string) []byte {
 	return b
 }
 
-// The frozen vector from DSH Mobile's docs/TAILCAT.md: with the same label, this package must
-// reproduce it byte for byte, so existing apps can move onto it without breaking paired phones.
+// The wire v2 frozen vector with DSH Mobile's label. DSH Mobile's docs/TAILCAT.md must carry the same
+// values: its v1 vector (code 295936) describes the uncommitted exchange, which hosts no longer accept
+// (TestHostRejectsV1Hello).
 func TestFrozenVectorWithDSHLabel(t *testing.T) {
 	const label = "dsh-mobile-local-pairing-v1"
 	phone, err := KeyPairFromPrivate(b64(t, "ERERERERERERERERERERERERERERERERERERERERERE="))
@@ -33,25 +34,30 @@ func TestFrozenVectorWithDSHLabel(t *testing.T) {
 	if got := base64.StdEncoding.EncodeToString(host.Public[:]); got != "D6poTtKIZ7l/Smot7l34zpdOdrcBjj8iocTPJnhXDyA=" {
 		t.Fatalf("host public %s", got)
 	}
-	ps, err := NewSession(label, phone, host.Public[:], true)
+	nonce := b64(t, "REREREREREREREREREREREREREREREREREREREREREQ=")
+	commit := Commit(label, phone.Public[:], nonce)
+	if got := base64.StdEncoding.EncodeToString(commit[:]); got != "HnYkDXyQsAK46/99Ac05tBezHWWwGBiGq+FIYIScHcM=" {
+		t.Fatalf("commit %s", got)
+	}
+	ps, err := NewSession(label, phone, host.Public[:], true, nonce)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hs, err := NewSession(label, host, phone.Public[:], false)
+	hs, err := NewSession(label, host, phone.Public[:], false, nonce)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ps.Code != "295936" || hs.Code != "295936" {
+	if ps.Code != "933437" || hs.Code != "933437" {
 		t.Fatalf("codes %s %s", ps.Code, hs.Code)
 	}
-	if got := base64.StdEncoding.EncodeToString(ps.key); got != "380q6EYc859pXQkUCN6O6yEjVt0LPwnps+5K71Biy/c=" {
+	if got := base64.StdEncoding.EncodeToString(ps.key); got != "t//rOgjEARsMhj83BfiVqop/eRbw1t00Z3fyQL4UzPs=" || !bytes.Equal(ps.key, hs.key) {
 		t.Fatalf("key %s", got)
 	}
 	sealed, err := hs.sealWithNonce([]byte(`{"version":3}`), b64(t, "MzMzMzMzMzMzMzMz"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := base64.StdEncoding.EncodeToString(sealed); got != "MzMzMzMzMzMzMzMzCy/nmRJXOOnj64hGBAw4VoRK2dUw3zgf3IEP2kU=" {
+	if got := base64.StdEncoding.EncodeToString(sealed); got != "MzMzMzMzMzMzMzMzZK3iZP3rpvoh+Bk9sxZNBMqdAxZYW+EfL0AKpog=" {
 		t.Fatalf("sealed %s", got)
 	}
 	plain, err := ps.Open(sealed)
@@ -63,8 +69,9 @@ func TestFrozenVectorWithDSHLabel(t *testing.T) {
 func TestSessionsAgreeAndRejectTampering(t *testing.T) {
 	phone, _ := NewKeyPair()
 	host, _ := NewKeyPair()
-	ps, _ := NewSession(DefaultLabel, phone, host.Public[:], true)
-	hs, _ := NewSession(DefaultLabel, host, phone.Public[:], false)
+	nonce, _ := NewNonce()
+	ps, _ := NewSession(DefaultLabel, phone, host.Public[:], true, nonce)
+	hs, _ := NewSession(DefaultLabel, host, phone.Public[:], false, nonce)
 	if ps.Code != hs.Code || len(ps.Code) != 6 {
 		t.Fatalf("codes %q %q", ps.Code, hs.Code)
 	}
@@ -76,21 +83,48 @@ func TestSessionsAgreeAndRejectTampering(t *testing.T) {
 	if _, err := ps.Open(sealed); err == nil {
 		t.Fatal("tampered box opened")
 	}
-	other, _ := NewSession("another-label", phone, host.Public[:], true)
+	other, _ := NewSession("another-label", phone, host.Public[:], true, nonce)
 	if other.Code == ps.Code && bytes.Equal(other.key, ps.key) {
 		t.Fatal("label does not separate sessions")
+	}
+	nonce2 := append([]byte{}, nonce...)
+	nonce2[0] ^= 1
+	if moved, _ := NewSession(DefaultLabel, phone, host.Public[:], true, nonce2); bytes.Equal(moved.key, ps.key) {
+		t.Fatal("nonce is not bound into the key")
+	}
+}
+
+func TestCommitBindsKeyNonceAndLabel(t *testing.T) {
+	kp, _ := NewKeyPair()
+	nonce, _ := NewNonce()
+	c := Commit(DefaultLabel, kp.Public[:], nonce)
+	other, _ := NewKeyPair()
+	nonce2 := append([]byte{}, nonce...)
+	nonce2[31] ^= 1
+	for name, d := range map[string][32]byte{
+		"key":   Commit(DefaultLabel, other.Public[:], nonce),
+		"nonce": Commit(DefaultLabel, kp.Public[:], nonce2),
+		"label": Commit("another-label", kp.Public[:], nonce),
+	} {
+		if d == c {
+			t.Fatalf("commitment does not bind the %s", name)
+		}
 	}
 }
 
 func TestLowOrderPeerRejected(t *testing.T) {
 	own, _ := NewKeyPair()
-	if _, err := NewSession(DefaultLabel, own, make([]byte, 32), true); err == nil {
+	nonce, _ := NewNonce()
+	if _, err := NewSession(DefaultLabel, own, make([]byte, 32), true, nonce); err == nil {
 		t.Fatal("all-zero peer key accepted")
 	}
-	if _, err := NewSession(DefaultLabel, own, make([]byte, 31), true); err == nil {
+	if _, err := NewSession(DefaultLabel, own, make([]byte, 31), true, nonce); err == nil {
 		t.Fatal("short peer key accepted")
 	}
-	if _, err := NewSession("", own, own.Public[:], true); err == nil {
+	if _, err := NewSession("", own, own.Public[:], true, nonce); err == nil {
 		t.Fatal("empty label accepted")
+	}
+	if _, err := NewSession(DefaultLabel, own, own.Public[:], true, nonce[:31]); err == nil {
+		t.Fatal("short nonce accepted")
 	}
 }

@@ -40,12 +40,17 @@ type config struct {
 	Listen    []string          `json:"listen"`
 	Authorize bool              `json:"authorize"`
 	Audit     bool              `json:"audit"`
+	// v0.3.0-pre.4: Tailcat only (no lan listener, no relay), or no lan route.
+	TailcatOnly bool `json:"tailcatOnly"`
+	NoLAN       bool `json:"noLan"`
 }
 
 type relay struct {
 	URL    string `json:"url"`
 	Token  string `json:"token"`
 	Opaque bool   `json:"opaque"`
+	// AppAuth must be true with opaque: the app authenticates every connection itself.
+	AppAuth bool `json:"appAuth"`
 }
 
 type command struct {
@@ -55,14 +60,18 @@ type command struct {
 	Payload  string `json:"payload"`
 	QRPrefix string `json:"qrPrefix"`
 	// QRPrefix2 is the v2 invite's prefix; default tailpocket2:.
-	QRPrefix2 string   `json:"qrPrefix2"`
-	Service   string   `json:"service"`
-	Label     string   `json:"label"`
-	Instance  string   `json:"instance"`
-	Approve   bool     `json:"approve"`
-	OK        bool     `json:"ok"`
-	Allowed   []string `json:"allowed"`
-	Phone     string   `json:"phone"`
+	QRPrefix2 string `json:"qrPrefix2"`
+	// Emoji makes a v2 window: the event has qr2 and invite2 (no v1 qr), and every phone that pairs
+	// comes as a pairRequest event with the emoji, answered with confirm. Without it the window is v1
+	// (qr and invite) as before v0.3.0-pre.4.
+	Emoji    bool     `json:"emoji"`
+	Service  string   `json:"service"`
+	Label    string   `json:"label"`
+	Instance string   `json:"instance"`
+	Approve  bool     `json:"approve"`
+	OK       bool     `json:"ok"`
+	Allowed  []string `json:"allowed"`
+	Phone    string   `json:"phone"`
 }
 
 type runtime struct {
@@ -111,17 +120,22 @@ func Run(parent context.Context, in io.Reader, out io.Writer) error {
 	defer cancel()
 	r.ctx = ctx
 	hc := connecthost.Config{Name: r.cfg.Name, Port: r.cfg.Port, PairingPort: r.cfg.PairingPort, Identity: r.cfg.Identity,
-		Allowed: r.cfg.Allowed, Keys: r.cfg.Keys, DERPMapURL: r.cfg.DERPMapURL, Save: r.save, Listen: r.cfg.Listen}
+		Allowed: r.cfg.Allowed, Keys: r.cfg.Keys, DERPMapURL: r.cfg.DERPMapURL, Save: r.save, Listen: r.cfg.Listen,
+		TailcatOnly: r.cfg.TailcatOnly, NoLAN: r.cfg.NoLAN}
 	for _, rl := range r.cfg.Relays {
-		hc.Relays = append(hc.Relays, connecthost.Relay{URL: rl.URL, Token: rl.Token, Opaque: rl.Opaque})
+		hc.Relays = append(hc.Relays, connecthost.Relay{URL: rl.URL, Token: rl.Token, Opaque: rl.Opaque, AppAuth: rl.AppAuth})
 	}
 	if r.cfg.Authorize {
 		hc.Authorize = r.authorize
 	}
 	if r.cfg.Audit {
 		hc.Audit = func(e connecthost.Event) {
-			r.emit(map[string]any{"event": "audit", "kind": e.Kind, "phone": e.Phone, "route": e.Route,
-				"reason": e.Reason, "time": e.Time.UnixMilli()})
+			ev := map[string]any{"event": "audit", "kind": e.Kind, "phone": e.Phone, "route": e.Route,
+				"reason": e.Reason, "time": e.Time.UnixMilli()}
+			if e.Dropped > 0 {
+				ev["dropped"] = e.Dropped
+			}
+			r.emit(ev)
 		}
 	}
 	h, err := connecthost.New(hc)
@@ -141,8 +155,10 @@ func Run(parent context.Context, in io.Reader, out io.Writer) error {
 	}()
 
 	commands := make(chan command)
+	var readErr error // set before commands closes
 	go func() {
 		defer close(commands)
+		defer func() { readErr = sc.Err() }()
 		for sc.Scan() {
 			var c command
 			if json.Unmarshal(sc.Bytes(), &c) != nil {
@@ -176,6 +192,9 @@ func Run(parent context.Context, in io.Reader, out io.Writer) error {
 		select {
 		case c, ok := <-commands:
 			if !ok {
+				if readErr != nil { // a line over lineLimit: stop, and say so
+					return fail("invalid-command")
+				}
 				return nil
 			}
 			r.handle(c)
@@ -245,6 +264,9 @@ func (r *runtime) save(st connecthost.State) error {
 
 // authorize asks the app about one connection; no answer within authorizeTimeout denies it.
 func (r *runtime) authorize(phone, route string) error {
+	if phone == "" {
+		phone = "opaque" // an opaque relay connection: no known phone
+	}
 	return r.ask("a", map[string]any{"event": "authorize", "phone": phone, "route": route}, authorizeTimeout)
 }
 
@@ -346,28 +368,52 @@ func (r *runtime) pair(c command, fail func(string)) {
 		payload := c.Payload
 		opts.Payload = func(connecthost.Phone) (string, error) { return payload, nil }
 	}
+	w := &window{confirm: make(chan bool)}
+	if c.Emoji {
+		opts.Confirm = func(ctx context.Context, req connecthost.PairRequest) bool {
+			r.emit(map[string]any{"event": "pairRequest", "id": c.ID, "phone": req.Phone, "device": req.Device,
+				"route": req.Route, "emoji": req.Emoji})
+			select {
+			case ok := <-w.confirm:
+				return ok
+			case <-ctx.Done():
+				r.emit(map[string]any{"event": "pairRequestCancelled", "id": c.ID})
+				return false
+			}
+		}
+	}
 	p, err := r.h.Pair(r.ctx, opts)
 	if err != nil {
 		fail("pair-failed")
 		return
 	}
-	prefix2 := c.QRPrefix2
-	if prefix2 == "" {
-		prefix2 = connectinvite.DefaultPrefix2
+	w.p = p
+	ev := map[string]any{"event": "pairing", "id": c.ID, "expiresAt": p.Expires().Unix()}
+	if c.Emoji {
+		prefix2 := c.QRPrefix2
+		if prefix2 == "" {
+			prefix2 = connectinvite.DefaultPrefix2
+		}
+		qr2, err := p.QR2(prefix2)
+		if err != nil {
+			p.Close()
+			fail("invalid-qr-prefix")
+			return
+		}
+		ev["qr2"], ev["invite2"] = qr2, p.InviteV2()
+	} else {
+		qr, err := p.QR(prefix)
+		if err != nil {
+			p.Close()
+			fail("invalid-qr-prefix")
+			return
+		}
+		ev["qr"], ev["invite"] = qr, p.Invite()
 	}
-	qr, err := p.QR(prefix)
-	qr2, err2 := p.QR2(prefix2)
-	if err != nil || err2 != nil {
-		p.Close()
-		fail("invalid-qr-prefix")
-		return
-	}
-	w := &window{p: p, confirm: make(chan bool)}
 	r.mu.Lock()
 	r.pairings[c.ID] = w
 	r.mu.Unlock()
-	r.emit(map[string]any{"event": "pairing", "id": c.ID, "qr": qr, "invite": p.Invite(), "qr2": qr2, "invite2": p.InviteV2(),
-		"expiresAt": p.Expires().Unix()})
+	r.emit(ev)
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
@@ -451,7 +497,12 @@ func (r *runtime) forward() {
 			}
 			defer app.Close()
 			if r.cfg.IdentifyPhone {
-				if _, err := io.WriteString(app, connecthost.PhoneOf(conn)+"\n"); err != nil {
+				// An opaque relay connection is no known phone: say so, never "".
+				id := connecthost.PhoneOf(conn)
+				if id == "" {
+					id = "opaque"
+				}
+				if _, err := io.WriteString(app, id+"\n"); err != nil {
 					return
 				}
 			}

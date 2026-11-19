@@ -33,6 +33,7 @@ public final class TailPocketBridge: @unchecked Sendable {
         "tailPocket.pair", "tailPocket.connect", "tailPocket.disconnect", "tailPocket.sync", "tailPocket.path", "tailPocket.link",
         "tailPocket.nearby.start", "tailPocket.nearby.stop", "tailPocket.local.begin", "tailPocket.local.finish", "tailPocket.local.cancel", "tailPocket.scan",
         "tailPocket.store.phoneKey", "tailPocket.store.saveLink", "tailPocket.store.link", "tailPocket.store.deleteLink",
+        "tailPocket.setTailcatOnly",
     ]
 
     private let store: any TailPocketLinkStore
@@ -71,8 +72,10 @@ public final class TailPocketBridge: @unchecked Sendable {
             // Text and v2 objects pair over every route (a v1 text as its one tailcat route); a v1 object over Tailcat.
             let invite: TailPocketInvite2
             switch args["invite"] {
-            case let text as String:
-                invite = try TailPocket.decodeInvite2(TailPocket.inviteText(in: text, prefix: Self.prefix(a)) ?? text, prefix: Self.prefix(a))
+            case let given as String:
+                let prefix2 = args["prefix2"] as? String ?? TailPocket.defaultPrefix2
+                let text = TailPocket.inviteText(in: given, prefixes: [prefix2, Self.prefix(a)]) ?? given
+                invite = try TailPocket.decodeInvite2(text, prefix: text.hasPrefix(prefix2) ? prefix2 : Self.prefix(a))
             case let object as [String: Any] where (object["v"] as? NSNumber)?.intValue == 2:
                 invite = try Self.decode(TailPocketInvite2.self, object)
             case let object as [String: Any]:
@@ -83,10 +86,17 @@ public final class TailPocketBridge: @unchecked Sendable {
             }
             let key = try (args["phoneKey"] as? String) ?? store.phoneKey()
             let timeout = (args["timeoutMs"] as? NSNumber).map { $0.doubleValue / 1000 } ?? 90
+            let emit = self.emit
             let link = try await TailPocket.pair(invite, phoneKey: key, device: args["device"] as? String ?? "Phone",
-                                                     derpMapURL: args["derpMapUrl"] as? String ?? "", timeout: timeout)
+                                                     derpMapURL: args["derpMapUrl"] as? String ?? "", timeout: timeout) { emoji in
+                emit("tailPocket.pair.emoji", ["emoji": emoji])
+            }
             if args["save"] as? Bool == true { try store.saveLink(link, slot: args["slot"] as? String ?? "default") }
             return try Self.value(link)
+        },
+        "tailPocket.setTailcatOnly": { a in
+            TailPocket.setTailcatOnly(Self.dict(a)["on"] as? Bool == true)
+            return nil
         },
         "tailPocket.connect": { [unowned self] a in
             let args = Self.dict(a)
@@ -103,7 +113,7 @@ public final class TailPocketBridge: @unchecked Sendable {
             let connection = try TailPocket.connect(link, derpMapURL: args["derpMapUrl"] as? String ?? "")
             let handle = next()
             lock.withLock { connections[handle] = (connection, slot) }
-            return ["handle": handle, "port": connection.port, "baseUrl": connection.baseURL.absoluteString] as [String: Any]
+            return ["handle": handle, "port": connection.port, "baseUrl": connection.baseURL.absoluteString, "token": connection.token] as [String: Any]
         },
         "tailPocket.disconnect": { [unowned self] a in
             let handle = (Self.dict(a)["handle"] as? NSNumber)?.int64Value ?? -1

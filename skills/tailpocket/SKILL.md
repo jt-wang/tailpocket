@@ -67,8 +67,8 @@ QR text goes in on stdin, not on the command line, so it stays out of `ps` and s
 ```sh
 P="$T/tailpocket-phone"
 $P pair -key "$T/phone.key" -out "$T/link.json" - < qr.txt   # prints: paired with "<name>"
-$P connect -link "$T/link.json" &                             # keeps running; prints: listening 127.0.0.1:PORT
-curl http://127.0.0.1:PORT/<a path the user's server answers>
+$P connect -link "$T/link.json" &                             # keeps running; prints: listening 127.0.0.1:PORT base BASE token …
+curl BASE/<a path the user's server answers>                  # BASE is http://127.0.0.1:PORT/_tailpocket/<token>
 ```
 
 ## 4. The phone side
@@ -79,7 +79,9 @@ React Native, NSH). For every stack:
 - Scan with the ready-made scanner and pairing screen unless the user already has a camera flow;
   any scanner works, since the QR text is decoded by `decodeInvite`.
 - Store the phone key and the link with the provided Keychain or Keystore store.
-- Point the app's existing networking at `connection.baseUrl`. Do not rewrite its protocol.
+- Point the app's existing networking at `connection.baseUrl` and build every URL by appending a
+  path to it (`baseUrl + "/api"`). It carries a per-connection secret in its path; a request
+  without it gets 403. Do not rewrite the app's protocol.
 - Android: set `@xml/tailpocket_network_security_config`, or plain HTTP to 127.0.0.1 is refused.
 - iOS: add `NSCameraUsageDescription`, `NSLocalNetworkUsageDescription` and the Bonjour service.
 

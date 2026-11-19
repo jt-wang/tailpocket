@@ -49,6 +49,34 @@ test("nearby events arrive through the emitter and stop with it", async () => {
   assert.deepEqual(seen, ["Mac"]);
 });
 
+test("the pairing emoji arrive through the emoji event while pair waits", async () => {
+  const n = fakeNative({});
+  const tailPocket = createTailPocket(reactNativeTransport(n.module, n.emitter));
+  const shown: string[][] = [];
+  n.module.call = async (name, args) => { n.calls.push([name, args]); n.emit("tailPocket.pair.emoji", { emoji: ["🐶", "🌙", "🍕", "🔑"] }); return { name: "Mac", key: "k" }; };
+  await tailPocket.pair("tailpocket2:x", { device: "Pixel", onEmoji: (e) => shown.push(e) });
+  assert.deepEqual(shown, [["🐶", "🌙", "🍕", "🔑"]]);
+  await tailPocket.setTailcatOnly(true);
+  assert.deepEqual(n.calls.at(-1), ["tailPocket.setTailcatOnly", { on: true }]);
+});
+
+// RCTEventEmitter on iOS drops events missing from supportedEvents(): it must list every event the bridges emit.
+test("the iOS module lists every bridge event", async () => {
+  const { readFileSync } = await import("node:fs");
+  const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
+  const emitted = new Set([...read("../../apple/Sources/TailPocket/Bridge.swift").matchAll(/emit\("(tailPocket\.[a-zA-Z.]+)"/g)].map((m) => m[1]));
+  const supported = read("../ios/TailPocketModule.swift").match(/supportedEvents\(\) -> \[String\] \{ \[([^\]]*)\]/)![1];
+  assert.deepEqual([...emitted].sort(), ["tailPocket.nearby", "tailPocket.pair.emoji"]);
+  for (const e of emitted) assert.ok(supported.includes(`"${e}"`), e);
+});
+
+test("connect passes the native baseUrl and token through", async () => {
+  const n = fakeNative({ "tailPocket.connect": { handle: 1, port: 5555, baseUrl: "http://127.0.0.1:5555/_tailpocket/TOK", token: "TOK" } });
+  const c = await createTailPocket(reactNativeTransport(n.module, n.emitter)).connect();
+  assert.equal(c.token, "TOK");
+  assert.ok(c.baseUrl.endsWith(`/_tailpocket/${c.token}`));
+});
+
 test("without the native module it says how to fix that", () => {
   assert.throws(() => reactNativeTransport(undefined, undefined), /TailPocket native module is missing/);
 });

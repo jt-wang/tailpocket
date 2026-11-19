@@ -578,34 +578,13 @@ func TestToken(t *testing.T) {
 	}
 	acc.CloseNow()
 
-	open := newEnv(t, func(c *connectrelay.Config) { c.Token = ""; c.Open = true })
-	oh, oroom, err := open.openHost(ctx, hostOpts{})
-	if err != nil {
-		t.Fatalf("open relay, no token: %v", err)
-	}
-	defer oh.CloseNow()
-	op, _, err := open.phone(ctx, oroom)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer op.CloseNow()
-	oid, err := nextIncoming(ctx, oh)
-	if err != nil {
-		t.Fatal(err)
-	}
-	oa, _, err := open.accept(ctx, oroom, oid, "")
-	if err != nil {
-		t.Fatalf("open relay accept without token: %v", err)
-	}
-	oa.CloseNow()
 }
 
+// There is no open relay: without a token anyone could register a room and use the relay to
+// pass anything between any two parties.
 func TestNoTokenNotOpen(t *testing.T) {
-	if _, err := connectrelay.NewServer(connectrelay.Config{}); err == nil {
-		t.Fatal("NewServer with no token and not open must refuse")
-	}
-	if _, err := connectrelay.NewServer(connectrelay.Config{Open: true, PublicHost: testPublicHost}); err != nil {
-		t.Fatalf("open relay without token: %v", err)
+	if _, err := connectrelay.NewServer(connectrelay.Config{PublicHost: testPublicHost}); !errors.Is(err, connectrelay.ErrNoToken) {
+		t.Fatalf("NewServer with no token: %v, want ErrNoToken", err)
 	}
 }
 
@@ -1343,7 +1322,8 @@ func TestLogsNoSecretsOnRefusals(t *testing.T) {
 // line with how many were left out.
 func TestRefusedLogLimited(t *testing.T) {
 	clk := newClock()
-	e := newEnv(t, func(c *connectrelay.Config) { c.Now = clk.Now })
+	// HostRate also counts /v1/accept; raised so all 50 reach the token check and get 401.
+	e := newEnv(t, func(c *connectrelay.Config) { c.Now = clk.Now; c.HostRate = 100 })
 	cl := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 	get := func() {
 		resp, err := cl.Get(e.ts.URL + connectrelay.PathAccept + "?room=AAAAAAAAAAAAAAAAAAAAAA&id=AAAAAAAAAAAAAAAAAAAAAA")

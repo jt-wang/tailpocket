@@ -21,7 +21,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
-/** `NativeModules.TailPocket`: every bridge function through one `call(name, args)`. */
+/** `NativeModules.TailPocket`: every bridge function through one `call(name, args)`, and every bridge event (`tailPocket.nearby`, `tailPocket.pair.emoji`). */
 class TailPocketModule(private val context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val bridge = TailPocketBridge.create(

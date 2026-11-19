@@ -1,5 +1,5 @@
 // React Native: `import { tailPocket } from "react-native-tailpocket"`, then the same calls as NSH
-// (see sdk/js/client.ts): tailPocket.scan(), tailPocket.pair(invite, { device, save: true }), tailPocket.connect() …
+// (see sdk/js/client.ts): tailPocket.scan(), tailPocket.pair(invite, { device, save: true, onEmoji }), tailPocket.connect() …
 import { NativeEventEmitter, NativeModules } from "react-native";
 import { createTailPocket } from "tailpocket-client";
 import { reactNativeTransport } from "./transport";

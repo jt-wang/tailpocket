@@ -43,7 +43,7 @@ func TestReviewRelayFloodBlocksLAN(t *testing.T) {
 	waitRelay(t, h)
 	serveApp(t, h)
 
-	p, err := h.Pair(context.Background(), PairOptions{})
+	p, err := h.Pair(context.Background(), PairOptions{Confirm: confirmAll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestReviewRelayFloodBlocksLAN(t *testing.T) {
 	inv.Via = lanVia(hostAddr)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	link, err := connectphone.PairV2(ctx, inv, connectphone.NewKey(), connectphone.Options{Device: "Test Phone"})
+	link, err := connectphone.PairV2(ctx, inv, connectphone.NewKey(), connectphone.Options{OnSAS: func([]string) {}, Device: "Test Phone"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestReviewNoisePairingTakesAnyNodekey(t *testing.T) {
 	victim := key.NewNode()
 	victimID := victim.Public().String()
 
-	p, err := h.Pair(context.Background(), PairOptions{})
+	p, err := h.Pair(context.Background(), PairOptions{Confirm: confirmAll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestReviewNoisePairingTakesAnyNodekey(t *testing.T) {
 	p.Close()
 
 	// The real phone with that nodekey now pairs, over lan, from a new invite.
-	p2, err := h.Pair(context.Background(), PairOptions{})
+	p2, err := h.Pair(context.Background(), PairOptions{Confirm: confirmAll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestReviewNoisePairingTakesAnyNodekey(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	victimKey, _ := victim.MarshalText()
-	if _, err := connectphone.PairV2(ctx, inv2, string(victimKey), connectphone.Options{Device: "Victim"}); err != nil {
+	if _, err := connectphone.PairV2(ctx, inv2, string(victimKey), connectphone.Options{OnSAS: func([]string) {}, Device: "Victim"}); err != nil {
 		t.Fatalf("the phone that holds %s cannot pair over lan: %v", victimID, err)
 	}
 }

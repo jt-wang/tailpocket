@@ -67,11 +67,18 @@ type Config struct {
 	// and, once paired, from the host.
 	Relays []Relay
 	// Listen are addresses ("192.168.1.20:7681") the host accepts end-to-end encrypted connections on
-	// directly, as route "lan". Phones dial them as written, so give addresses they can reach.
+	// directly, as route "lan". Phones dial them as written, so give addresses they can reach. Empty
+	// means automatic: every private address of the computer's Wi-Fi and Ethernet, followed as they
+	// change, on a port derived from the host's key.
 	Listen []string
+	// NoLAN turns the local network route off: no listener at all, and invites and routes list none.
+	NoLAN bool
+	// TailcatOnly runs the host as before v0.3: Tailcat only, no local network listener, no relay, and
+	// v2 invites and routes list only Tailcat. Relays and Listen must be empty.
+	TailcatOnly bool
 	// Authorize, when set, decides every connection from a known phone before the app sees it: an error
-	// closes it (an encrypted session gets bye "denied"). It runs for Tailcat and the encrypted routes;
-	// opaque relays carry no phone identity, so the app checks those itself.
+	// closes it (an encrypted session gets bye "denied"). It runs for every route; on an opaque relay,
+	// which carries no phone identity, phone is "" (deny it unless the app's own layer decides).
 	Authorize func(phone, route string) error
 	// Audit, when set, gets one Event per pairing, revoke, session and refusal. It never gets keys,
 	// codes or payloads.
@@ -84,8 +91,13 @@ type Relay struct {
 	Token string
 	// Opaque carries the phone's bytes to the app as they are, without TailPocket's Noise layer, for
 	// apps that already encrypt end to end themselves (their own pinned TLS). The host then cannot tell
-	// which phone a connection comes from: PhoneOf is "".
+	// which phone a connection comes from: PhoneOf is "", Authorize runs with phone "", and revoking or
+	// disconnecting any phone closes every open opaque connection.
 	Opaque bool
+	// AppAuth must be set with Opaque: the app declares that it authenticates every connection itself
+	// (its own TLS with a pinned key and a per-device credential, for example). New refuses an opaque
+	// relay without it, since anyone who knows the room reaches the app's port through it.
+	AppAuth bool
 }
 
 // Host is safe for concurrent use.
@@ -100,8 +112,11 @@ type Host struct {
 	control           *chanListener // the main node's control port
 	relays            []Relay
 	listen            []string
+	autoLANOn         bool
 	authorize         func(phone, route string) error
 	audit             func(Event)
+	auditMu           sync.Mutex
+	denied            map[string]*deniedWindow // per Reason, for record
 
 	op sync.Mutex // serializes changes to the allowlist and main node
 
@@ -119,6 +134,7 @@ type Host struct {
 	windows  map[string]*Pairing               // cid -> open pairing window
 	sessions map[*connectsecure.Session]string // encrypted sessions -> phone
 	routeLns []routeListener                   // running relay and lan listeners
+	lan      *autoLAN                          // the automatic lan route, once started
 }
 
 func New(cfg Config) (*Host, error) {
@@ -128,7 +144,8 @@ func New(cfg Config) (*Host, error) {
 	h := &Host{name: connectinvite.CleanName(cfg.Name), port: cfg.Port, pairingPort: cfg.PairingPort, save: cfg.Save,
 		derpMapURL: cfg.DERPMapURL, start: realStart, listener: newChanListener(), pairings: map[*Pairing]struct{}{},
 		conns: map[*Conn]struct{}{}, controlPort: DefaultControlPort, control: newChanListener(), relays: cfg.Relays,
-		listen: cfg.Listen, authorize: cfg.Authorize, audit: cfg.Audit,
+		listen: cfg.Listen, autoLANOn: !cfg.NoLAN && !cfg.TailcatOnly && len(cfg.Listen) == 0,
+		authorize: cfg.Authorize, audit: cfg.Audit,
 		noise: map[key.NodePublic][32]byte{}, windows: map[string]*Pairing{}, sessions: map[*connectsecure.Session]string{}}
 	if h.name == "" {
 		hostname, _ := os.Hostname()
@@ -143,12 +160,21 @@ func New(cfg Config) (*Host, error) {
 	if h.port == h.pairingPort || h.controlPort == h.port || h.controlPort == h.pairingPort {
 		return nil, errors.New("connecthost: Port, PairingPort and ControlPort must differ")
 	}
+	if cfg.TailcatOnly && (len(cfg.Relays) > 0 || len(cfg.Listen) > 0) {
+		return nil, errors.New("connecthost: TailcatOnly takes no Relays or Listen")
+	}
+	if cfg.NoLAN && len(cfg.Listen) > 0 {
+		return nil, errors.New("connecthost: NoLAN with Listen")
+	}
 	for _, r := range cfg.Relays {
 		if !connectrelay.ValidURL(r.URL) {
 			return nil, fmt.Errorf("connecthost: relay %q: use wss:// (ws:// only to a loopback address)", r.URL)
 		}
 		if r.Token == "" {
 			return nil, errors.New("connecthost: a relay needs its token")
+		}
+		if r.Opaque && !r.AppAuth {
+			return nil, errors.New("connecthost: an opaque relay reaches the app unauthenticated; set AppAuth once the app authenticates every connection itself")
 		}
 	}
 	for _, a := range cfg.Listen {
@@ -238,6 +264,7 @@ func (h *Host) Start(ctx context.Context) error {
 	if err := h.startRoutes(); err != nil {
 		return err
 	}
+	h.startAutoLAN()
 	if running || len(allowed) == 0 {
 		return nil
 	}
@@ -535,6 +562,7 @@ func (h *Host) Close() error {
 	}
 	routeLns := h.routeLns
 	h.routeLns = nil
+	lan := h.lan
 	sessions := make([]*connectsecure.Session, 0, len(h.sessions))
 	for s := range h.sessions {
 		sessions = append(sessions, s)
@@ -549,6 +577,9 @@ func (h *Host) Close() error {
 	}
 	for _, l := range routeLns {
 		_ = l.ln.Close()
+	}
+	if lan != nil {
+		lan.close()
 	}
 	for _, s := range sessions {
 		_ = s.Close() // bye stopping
@@ -621,11 +652,12 @@ func removedKeys(prev, next []key.NodePublic) map[string]bool {
 	return out
 }
 
-// takeConnsLocked unregisters and marks the open connections of phones, for closeConns. h.mu must be held.
+// takeConnsLocked unregisters and marks the open connections of phones, for closeConns. Opaque relay
+// connections (Phone "") may be any phone's, so they go whenever a phone does. h.mu must be held.
 func (h *Host) takeConnsLocked(phones map[string]bool) []*Conn {
 	var out []*Conn
 	for c := range h.conns {
-		if phones[c.Phone] {
+		if phones[c.Phone] || (c.Phone == "" && len(phones) > 0) {
 			c.revoked.Store(true)
 			delete(h.conns, c)
 			out = append(out, c)
@@ -643,7 +675,7 @@ func closeConns(cs []*Conn) {
 // Conn is a connection from a paired phone.
 type Conn struct {
 	net.Conn
-	Phone string // the phone's key ("nodekey:…"); "" on an opaque relay
+	Phone string // the phone's key ("nodekey:…"); "" on an opaque relay (identity line "opaque")
 	Route string // RouteTailcat, RouteRelay or RouteLAN
 
 	host    *Host

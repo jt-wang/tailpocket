@@ -4,7 +4,7 @@
 // unauthorized, taken, unreachable, revoked, mismatch, handshake-closed, denied, local-failed,
 // cancelled, timeout,
 // unknown-operation, unknown-handle, failed. "revoked" comes only from the host's encrypted bye:
-// delete the link. Every other code keeps it. Blocking calls (Pair, LocalPairStart, LocalPairFinish) must run off the main thread;
+// delete the link. Every other code keeps it. Blocking calls (Pair, Pair2, Pair2Finish, LocalPairStart, LocalPairFinish) must run off the main thread;
 // pass a caller-chosen op number to cancel them with Cancel(op).
 package connectmobile
 
@@ -14,6 +14,7 @@ import (
 	"errors"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jt-wang/tailpocket/connectinvite"
@@ -34,6 +35,8 @@ func code(err error) string {
 		return "timeout"
 	case errors.Is(err, connectinvite.ErrInvalid):
 		return "invalid-invite"
+	case errors.Is(err, connectphone.ErrNoSAS):
+		return "failed"
 	case errors.Is(err, connectphone.ErrRevoked):
 		return "revoked"
 	case errors.Is(err, connectphone.ErrUnauthorized):
@@ -178,8 +181,12 @@ func Pair(op int64, inviteJSON, phoneKey, device, derpMapURL string, timeoutMs i
 	return text
 }
 
-// Pair2 pairs from v2 invite JSON (DecodeInvite2) over whichever of its routes works and returns the
-// Link JSON to store. Blocking.
+// Pair2 pairs from v2 invite JSON (DecodeInvite2) over whichever of its routes works. Blocking. It
+// returns {"emoji":["🐶","🌙","🍕","🔑"]} once the computer waits for its user to compare them: show
+// them with "Check that your computer shows the same, then confirm there", then call
+// Pair2Finish(op, …) for the Link JSON to store. A phone pairing again after a lost reply gets the
+// Link JSON (no "emoji") at once. Errors as {"error":…}; "unauthorized" after the emoji means the
+// computer's user said no or the code was spent: show a new code on the computer.
 func Pair2(op int64, inviteJSON, phoneKey, device, derpMapURL string, timeoutMs int) string {
 	var inv connectinvite.V2
 	if json.Unmarshal([]byte(inviteJSON), &inv) != nil || inv.Validate() != nil {
@@ -191,21 +198,46 @@ func Pair2(op int64, inviteJSON, phoneKey, device, derpMapURL string, timeoutMs 
 	if inv.Expired(time.Now()) {
 		return fail("expired")
 	}
-	ctx, _, ok := begin(op, timeoutOf(timeoutMs))
+	ctx, o, ok := begin(op, timeoutOf(timeoutMs)+time.Minute) // the computer's user may take a minute
 	if !ok {
 		return fail("failed")
 	}
-	defer end(op)
-	link, err := connectphone.PairV2(ctx, inv, phoneKey, connectphone.Options{Device: device, DERPMapURL: derpMapURL})
-	if err != nil {
-		return fail(code(err))
+	go func() {
+		link, err := connectphone.PairV2(ctx, inv, phoneKey, connectphone.Options{Device: device, DERPMapURL: derpMapURL,
+			TailcatOnly: tailcatOnly.Load(), OnSAS: func(e []string) {
+				body, _ := json.Marshal(map[string][]string{"emoji": e})
+				o.code <- string(body)
+			}})
+		if err != nil {
+			o.result <- fail(code(err))
+			return
+		}
+		text, err := link.Encode()
+		if err != nil {
+			o.result <- fail("failed")
+			return
+		}
+		o.result <- text
+	}()
+	select {
+	case e := <-o.code:
+		return e
+	case r := <-o.result:
+		end(op)
+		return r
 	}
-	text, err := link.Encode()
-	if err != nil {
-		return fail("failed")
-	}
-	return text
 }
+
+// Pair2Finish waits for the computer's answer after Pair2 returned the emoji and returns the Link
+// JSON to store, or {"error":…}.
+func Pair2Finish(op int64, timeoutMs int) string { return LocalPairFinish(op, timeoutMs) }
+
+var tailcatOnly atomic.Bool
+
+// SetTailcatOnly is the phone's preference to reach computers over Tailcat only: Pair2, Connect and
+// Sync then never use the relay or local network routes a computer lists. Set it before Connect;
+// handles already open keep the setting they started with.
+func SetTailcatOnly(on bool) { tailcatOnly.Store(on) }
 
 // LocalPairStart connects to a host found over Bonjour ("ip:port") and returns {"code":"123456"}
 // for the phone to show. Then call LocalPairFinish(op, …) for the invite.
@@ -235,6 +267,7 @@ func LocalPairStart(op int64, address, label, device string) string {
 }
 
 // LocalPairFinish waits for the host's user to approve and returns the invite JSON for Pair.
+// Pair2Finish is the same wait.
 func LocalPairFinish(op int64, timeoutMs int) string {
 	opsMu.Lock()
 	o := ops[op]
@@ -270,14 +303,16 @@ var (
 	conns            = map[int64]*connection{}
 )
 
-// Connect opens a loopback forward to the Link's host: {"handle":n,"port":p}. Point the app's
-// HTTP or WebSocket client at http://127.0.0.1:p. Nothing goes over the network until it connects.
+// Connect opens a loopback forward to the Link's host: {"handle":n,"port":p,"token":t,"base":b}. Point the app's
+// HTTP or WebSocket client at "http://127.0.0.1:"+p+b (every path under b), or start a raw
+// connection with the line "TP-FWD "+t+"\n" (connectphone.Forward). Nothing goes over the network
+// until it connects.
 func Connect(linkJSON, derpMapURL string) string {
 	link, err := connectphone.ParseLink(linkJSON)
 	if err != nil {
 		return fail("invalid-link")
 	}
-	s, err := connectphone.Connect(link, connectphone.Options{DERPMapURL: derpMapURL})
+	s, err := connectphone.Connect(link, connectphone.Options{DERPMapURL: derpMapURL, TailcatOnly: tailcatOnly.Load()})
 	if err != nil {
 		return fail("invalid-link")
 	}
@@ -291,7 +326,7 @@ func Connect(linkJSON, derpMapURL string) string {
 	nextHandle++
 	conns[h] = &connection{session: s, forward: f}
 	connMu.Unlock()
-	body, _ := json.Marshal(map[string]int64{"handle": h, "port": int64(f.Port())})
+	body, _ := json.Marshal(map[string]any{"handle": h, "port": f.Port(), "token": f.Token(), "base": f.BasePath()})
 	return string(body)
 }
 
