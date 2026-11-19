@@ -123,7 +123,9 @@ Error codes. At start: `invalid-config`, `unsupported-version`, `invalid-forward
 `listen` entry, an opaque relay without `appAuth`, `tailcatOnly` with `relays` or `listen`, and `noLan`
 with `listen` are `invalid-config`. For a command:
 `invalid-command`, `unknown-command`, `duplicate-id`, `unknown-pairing`, `pair-failed`,
-`invalid-qr-prefix`, `local-unavailable`, `local-not-approved`, `local-failed`,
+`invalid-qr-prefix`, `local-unavailable`, `local-not-approved`, `local-too-many-attempts` (the
+window answered `MaxAttempts` = 3 phones without an approval and closed: ask the user to start
+again), `local-failed`,
 `nothing-to-confirm`, `invalid-allowed`, `operation-failed`.
 
 `state.identity` contains private keys. Store it like a password; a lost identity means every phone

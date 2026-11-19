@@ -100,7 +100,12 @@ characters). `label` is the label's UTF-8 bytes; `‖` is concatenation; string 
    {"commit":"<b64(commit)>","device":"Pixel 9","v":2}
    ```
 
-2. host → phone: `{"publicKey":"<b64(hostPub)>","v":2}` (a fresh X25519 key per attempt).
+2. host → phone: `{"publicKey":"<b64(hostPub)>","v":2}` (a fresh X25519 key per attempt). A window
+   sends this to at most 3 commitments (`MaxAttempts`), and to one source address at most once
+   every 2 s (`SourceGap`); a commitment past either limit is closed without a reply. Once 3 have
+   had it without an approval, the window ends (`ErrTooManyAttempts`). Each key a peer receives
+   lets it compute the code the host would show, whether or not it reveals, so this, not the
+   commitment alone, bounds the guesses: see SECURITY.md.
 3. phone → host, the reveal: `{"nonce":"<b64(nonce)>","publicKey":"<b64(phonePub)>","v":2}`. The host
    recomputes `commit` from these and closes the connection if it differs.
 4. Both sides compute:

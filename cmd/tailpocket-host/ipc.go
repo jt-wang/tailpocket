@@ -470,6 +470,8 @@ func (r *runtime) local(c command, fail func(string)) {
 			r.emit(map[string]any{"event": "localDelivered", "id": c.ID})
 		case errors.Is(err, connectlocal.ErrUnavailable):
 			fail("local-unavailable")
+		case errors.Is(err, connectlocal.ErrTooManyAttempts):
+			fail("local-too-many-attempts")
 		case errors.Is(err, connectlocal.ErrNotApproved), errors.Is(err, context.Canceled):
 			fail("local-not-approved")
 		default:

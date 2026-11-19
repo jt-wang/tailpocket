@@ -43,13 +43,13 @@ for target in ${*:-apple android}; do
       -o build/android/tailpocket-mobile.aar ./connectmobile
     check_paths build/android/tailpocket-mobile.aar
     # A local Maven repository, so the Android library modules can depend on it like any artifact.
-    m2=build/android/m2/io/jingtao/tailpocket/tailpocket-mobile/0.3.0-pre.4
+    m2=build/android/m2/io/jingtao/tailpocket/tailpocket-mobile/0.3.0-pre.6
     mkdir -p "$m2"
-    cp build/android/tailpocket-mobile.aar "$m2/tailpocket-mobile-0.3.0-pre.4.aar"
+    cp build/android/tailpocket-mobile.aar "$m2/tailpocket-mobile-0.3.0-pre.6.aar"
     printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
       '<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion>' \
-      '<groupId>io.jingtao.tailpocket</groupId><artifactId>tailpocket-mobile</artifactId><version>0.3.0-pre.4</version>' \
-      '<packaging>aar</packaging></project>' > "$m2/tailpocket-mobile-0.3.0-pre.4.pom"
+      '<groupId>io.jingtao.tailpocket</groupId><artifactId>tailpocket-mobile</artifactId><version>0.3.0-pre.6</version>' \
+      '<packaging>aar</packaging></project>' > "$m2/tailpocket-mobile-0.3.0-pre.6.pom"
     ;;
   esac
   echo "built $target"

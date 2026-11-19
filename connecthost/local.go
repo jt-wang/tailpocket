@@ -28,8 +28,14 @@ type LocalOptions struct {
 	Advertise func(connectmdns.Service) (stop func(), err error)
 }
 
+// ErrLocalUsed: ServeLocal was already called on this pairing window. Each window gets one, so its
+// connectlocal.MaxAttempts bound the guesses for the whole window; open a new window to try again.
+var ErrLocalUsed = errors.New("connecthost: ServeLocal runs once per pairing window; open a new one")
+
 // ServeLocal advertises the window over Bonjour and hands the invite, sealed, to the first phone
-// the user approves. It returns nil once delivered; the phone then joins with Wait as usual.
+// the user approves. It returns nil once delivered; the phone then joins with Wait as usual. It runs
+// once per window (ErrLocalUsed after that). On connectlocal.ErrTooManyAttempts it also ends the
+// window, so its QR code pairs nobody either: ask the user to start again.
 func (p *Pairing) ServeLocal(ctx context.Context, opts LocalOptions) error {
 	if !connectmdns.ValidType(opts.Service) {
 		return errors.New("connecthost: LocalOptions.Service must look like _name._tcp")
@@ -51,6 +57,13 @@ func (p *Pairing) ServeLocal(ctx context.Context, opts LocalOptions) error {
 	advertise := opts.Advertise
 	if advertise == nil {
 		advertise = connectmdns.Advertise
+	}
+	p.mu.Lock()
+	used := p.local
+	p.local = true
+	p.mu.Unlock()
+	if used {
+		return ErrLocalUsed
 	}
 	p.openV1() // the phone joins with the v1 invite it gets here (/pair; Confirm runs again, without emoji)
 	plaintext, err := json.Marshal(p.inv)
@@ -80,6 +93,9 @@ func (p *Pairing) ServeLocal(ctx context.Context, opts LocalOptions) error {
 	}
 	if advErr != nil {
 		return advErr
+	}
+	if errors.Is(err, connectlocal.ErrTooManyAttempts) {
+		p.Close()
 	}
 	return err
 }

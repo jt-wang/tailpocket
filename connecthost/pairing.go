@@ -80,6 +80,7 @@ type Pairing struct {
 
 	mu      sync.Mutex
 	v1      bool // a v1 invite left the host (QR, Invite, ServeLocal): /pair over Tailcat is open
+	local   bool // ServeLocal ran on this window (once per window)
 	waiting bool // Confirm is running
 	bound   string
 	noise   *[32]byte // the Noise key the bound phone brought, if any

@@ -6,8 +6,9 @@ anything else, or take over a machine. Every claim below names the code and the 
 it; `go test -race ./...` runs them, and `TAILPOCKET_LIVE=1` adds the ones on the real Tailcat
 network. The wire formats are in [PROTOCOL.md](PROTOCOL.md).
 
-Audits this covers: the third-round cryptography audit of 83d4174 (H1, D1, L1, P1–P3, I1–I4) and
-the fail-closed audit of 83d4174 (O1, F1, T1, G1, G2, M1, F2, K1, N1, R1, A1). Their failing tests
+Audits this covers: the third-round cryptography audit of 83d4174 (H1, D1, L1, P1–P3, I1–I4), the
+fail-closed audit of 83d4174 (O1, F1, T1, G1, G2, M1, F2, K1, N1, R1, A1) the pre.4 review
+(H1 retries, branch `audit-v03-pre4` 64f7145) and the pre.5 review (L2, branch `audit-v03-pre5` db527de). Their failing tests
 (branches `audit-v03-crypto` 2be300d and `audit-v03-failclosed` fb4b23e) are in this tree and pass.
 
 ## 1. The relay is not a proxy, an amplifier or an SSRF hop
@@ -99,9 +100,25 @@ The relay is trusted for nothing but availability: everything on it is Noise cip
   pending (`TestNoEmojiWithoutPending`).
 - **Same-Wi-Fi pairing (H1).** v1 let a neighbour make both 6-digit codes equal in about a second.
   v2 is commit-then-reveal: the phone commits to its key and a nonce before it sees the computer's,
-  so each try matches with probability 10^-6 and costs the user a tap
-  (`TestAuditLocalPairingMITMMatchesCodes`, which fails if the commitment check is removed). The
-  6-digit code stays behind the commitment; it is never turned into emoji.
+  so a machine in the middle cannot pick its key after seeing the other side's
+  (`TestAuditLocalPairingMITMMatchesCodes`, which fails if the commitment check is removed). It can
+  still throw an attempt away: each key the computer hands out lets it compute the code the
+  computer would show, without revealing anything. So a window hands its key to at most
+  `MaxAttempts` = 3 commitments, to one source address at most once every 2 s, and closes after 3
+  that were not approved (`local-too-many-attempts`; the user starts again). The phone starts one
+  attempt per user action, so it gives the attacker one fixed code. The chance that a window pairs
+  the attacker is therefore
+
+  P ≤ MaxAttempts × 10^-6 = 3 × 10^-6 per window the user opens
+
+  (the mod-10^6 bias adds under 10^-13), against 16% in a 2-minute window and 75% in a 15-minute one
+  at pre.4's measured 1557 keys/s. The worst an attacker gets beyond that is a closed window.
+  Tests: `TestAuditLocalPairingSilentRetries` (at most 2 keys in 3 s now),
+  `TestWindowEndsAfterMaxAttempts`, `TestOneAnswerPerSourceGap`; each fails with its limit removed.
+  The 3 attempts belong to the pairing window, not to one call: `ServeLocal` runs once per window and,
+  when they run out, ends the window, QR code included (`TestAuditServeLocalAgainGivesNewAttempts`,
+  `TestTooManyLocalAttemptsEndsTheWindow`).
+  The 6-digit code stays behind the commitment; it is never turned into emoji.
 - **Opaque relays (O1).** They skip the Noise layer for apps that encrypt end to end themselves, so
   the host refuses one unless the app sets `appAuth` (it authenticates every connection itself).
   Authorize runs with phone "" for each opaque connection, the identity line says `opaque`, and

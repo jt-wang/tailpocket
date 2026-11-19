@@ -79,7 +79,15 @@ func TestApprovedPairingDeliversPlaintextAndCodesMatch(t *testing.T) {
 	}
 }
 
+// noGap lets one test pair several times from loopback without waiting SourceGap.
+func noGap(t *testing.T) {
+	old := sourceGap
+	sourceGap = 0
+	t.Cleanup(func() { sourceGap = old })
+}
+
 func TestDeniedPhoneKeepsWindowOpenForTheNext(t *testing.T) {
+	noGap(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var calls atomic.Int32
@@ -253,12 +261,14 @@ func TestHostRejectsV1HelloAndMalformedHellos(t *testing.T) {
 }
 
 func TestHostDropsBadReveals(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	var prompts atomic.Int32
-	s := serve(t, ctx, HostOptions{Plaintext: []byte("ok"), HelloTimeout: 300 * time.Millisecond,
-		Confirm: func(context.Context, string, string) bool { prompts.Add(1); return true }})
-	addr := s.addr(t)
+	window := func() string {
+		s := serve(t, ctx, HostOptions{Plaintext: []byte("ok"), HelloTimeout: 300 * time.Millisecond,
+			Confirm: func(context.Context, string, string) bool { prompts.Add(1); return true }})
+		return s.addr(t)
+	}
 	kp, _ := NewKeyPair()
 	other, _ := NewKeyPair()
 	nonce, _ := NewNonce()
@@ -276,7 +286,7 @@ func TestHostDropsBadReveals(t *testing.T) {
 		"no nonce":    {"publicKey": enc(kp.Public[:]), "v": wireVersion},
 		"never sent":  nil,
 	} {
-		c, r := dialRaw(t, addr)
+		c, r := dialRaw(t, window()) // a window of its own: each bad reveal uses up one attempt
 		if err := writeLine(c, map[string]any{"commit": enc(commit[:]), "device": "x", "v": wireVersion}); err != nil {
 			t.Fatal(err)
 		}
@@ -292,7 +302,7 @@ func TestHostDropsBadReveals(t *testing.T) {
 		t.Fatal("the host's user was prompted for a reveal that does not match its commitment")
 	}
 	// The honest reveal of the same commitment is accepted: the checks above failed for their reason.
-	c, r := dialRaw(t, addr)
+	c, r := dialRaw(t, window())
 	_ = writeLine(c, map[string]any{"commit": enc(commit[:]), "device": "x", "v": wireVersion})
 	if _, err := readMessage(r); err != nil {
 		t.Fatal(err)
@@ -331,5 +341,98 @@ func TestPhoneRejectsV1Host(t *testing.T) {
 	}
 	if line := <-sentAfter; line != "" {
 		t.Fatalf("phone revealed to a v1 host: %q", line)
+	}
+}
+
+// H1, retries: a window hands its key to at most MaxAttempts commitments. Abandoned ones (the peer
+// learned the host's code and left) count, and the window then ends with ErrTooManyAttempts, so the
+// user starts again and sees why. An honest phone among them still pairs.
+func TestWindowEndsAfterMaxAttempts(t *testing.T) {
+	noGap(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var prompts atomic.Int32
+	s := serve(t, ctx, HostOptions{Plaintext: []byte("ok"), Confirm: func(context.Context, string, string) bool { prompts.Add(1); return true }})
+	addr := s.addr(t)
+	abandon := func() bool {
+		kp, _ := NewKeyPair()
+		nonce, _ := NewNonce()
+		commit := Commit(DefaultLabel, kp.Public[:], nonce)
+		c, err := net.Dial("tcp", addr) // refused once the window has ended
+		if err != nil {
+			return false
+		}
+		defer c.Close()
+		r := bufio.NewReader(c)
+		_ = writeLine(c, map[string]any{"commit": base64.StdEncoding.EncodeToString(commit[:]), "device": "x", "v": wireVersion})
+		m, err := readMessage(r)
+		return err == nil && m.PublicKey != ""
+	}
+	for i := 0; i < MaxAttempts-1; i++ {
+		if !abandon() {
+			t.Fatalf("attempt %d got no key", i+1)
+		}
+		time.Sleep(50 * time.Millisecond) // the handler sees the close and frees the slot
+	}
+	if got, err := Pair(ctx, addr, PhoneOptions{Label: DefaultLabel, Device: "honest"}); err != nil || string(got) != "ok" {
+		t.Fatalf("an honest phone after %d abandoned attempts: %q %v", MaxAttempts-1, got, err)
+	}
+	if err := <-s.err; err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+
+	// A window where every attempt is abandoned ends after MaxAttempts keys, without a prompt.
+	prompts.Store(0)
+	s = serve(t, ctx, HostOptions{Plaintext: []byte("ok"), Confirm: func(context.Context, string, string) bool { prompts.Add(1); return true }})
+	addr = s.addr(t)
+	keys := 0
+	for i := 0; i < MaxAttempts+5; i++ {
+		if abandon() {
+			keys++
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if keys != MaxAttempts || prompts.Load() != 0 {
+		t.Fatalf("%d keys handed out (want %d), %d prompts", keys, MaxAttempts, prompts.Load())
+	}
+	select {
+	case err := <-s.err:
+		if !errors.Is(err, ErrTooManyAttempts) {
+			t.Fatalf("Serve: %v, want ErrTooManyAttempts", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the window stayed open after MaxAttempts abandoned commitments")
+	}
+}
+
+// H1, retries: one source address gets the host's key at most once every SourceGap; a refused
+// commitment uses up no attempt.
+func TestOneAnswerPerSourceGap(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s := serve(t, ctx, HostOptions{Plaintext: []byte("ok"), Confirm: func(context.Context, string, string) bool { return true }})
+	addr := s.addr(t)
+	try := func() bool {
+		kp, _ := NewKeyPair()
+		nonce, _ := NewNonce()
+		commit := Commit(DefaultLabel, kp.Public[:], nonce)
+		c, r := dialRaw(t, addr)
+		defer c.Close()
+		_ = writeLine(c, map[string]any{"commit": base64.StdEncoding.EncodeToString(commit[:]), "device": "x", "v": wireVersion})
+		m, err := readMessage(r)
+		return err == nil && m.PublicKey != ""
+	}
+	if !try() {
+		t.Fatal("first attempt got no key")
+	}
+	time.Sleep(50 * time.Millisecond)
+	for i := 0; i < 5; i++ {
+		if try() {
+			t.Fatalf("attempt %d within SourceGap got a key", i+2)
+		}
+	}
+	time.Sleep(SourceGap)
+	if got, err := Pair(ctx, addr, PhoneOptions{Label: DefaultLabel, Device: "after the gap"}); err != nil || string(got) != "ok" {
+		t.Fatalf("after SourceGap: %q %v", got, err)
 	}
 }

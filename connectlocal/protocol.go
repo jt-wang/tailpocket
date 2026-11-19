@@ -38,7 +38,8 @@ type HostOptions struct {
 }
 
 // Serve runs one window, serving one phone at a time, until a phone is approved (nil), the window
-// expires (ErrNotApproved) or ctx ends (ctx.Err()).
+// expires (ErrNotApproved), MaxAttempts commitments got its key without an approval
+// (ErrTooManyAttempts) or ctx ends (ctx.Err()).
 func Serve(ctx context.Context, opts HostOptions) error {
 	if opts.Label == "" || opts.Confirm == nil || len(opts.Plaintext) == 0 || !time.Now().Before(opts.Expires) {
 		return errors.New("connectlocal: Label, Plaintext, Confirm and a future Expires are required")
@@ -73,7 +74,7 @@ func Serve(ctx context.Context, opts HostOptions) error {
 		listeners = append(listeners, ln)
 	}
 
-	s := &server{opts: opts, hello: hello, window: window, done: make(chan struct{})}
+	s := &server{opts: opts, hello: hello, window: window, done: make(chan struct{}), lastAnswer: map[string]time.Time{}}
 	var wg sync.WaitGroup
 	for i, ln := range listeners {
 		wg.Add(1)
@@ -95,11 +96,13 @@ func Serve(ctx context.Context, opts HostOptions) error {
 	cancel()
 	wg.Wait()
 	s.mu.Lock()
-	approved := s.approved
+	approved, tooMany := s.approved, s.tooMany
 	s.mu.Unlock()
 	switch {
 	case approved:
 		return nil
+	case tooMany:
+		return ErrTooManyAttempts
 	case ctx.Err() != nil:
 		return ctx.Err()
 	default:
@@ -114,8 +117,13 @@ type server struct {
 	mu       sync.Mutex
 	busy     bool
 	approved bool
-	done     chan struct{}
-	doneOnce sync.Once
+	tooMany  bool
+	// attempts counts the commitments answered with the host's key; lastAnswer, per source address,
+	// when the last one was (MaxAttempts, SourceGap).
+	attempts   int
+	lastAnswer map[string]time.Time
+	done       chan struct{}
+	doneOnce   sync.Once
 }
 
 func (s *server) accept(ln net.Listener, b Binding, wg *sync.WaitGroup) {
@@ -183,6 +191,29 @@ func (s *server) handle(conn net.Conn, b Binding) {
 	if device == "" {
 		device = "Phone"
 	}
+	// Each key the host hands out lets the peer compute the code the host would show, so it is a
+	// guess even if the peer never reveals: a window hands out MaxAttempts, at most one per source
+	// address every SourceGap, and then ends.
+	s.mu.Lock()
+	source := remote.IP.String()
+	if s.attempts >= MaxAttempts || time.Since(s.lastAnswer[source]) < sourceGap {
+		s.mu.Unlock()
+		return
+	}
+	s.attempts++
+	s.lastAnswer[source] = time.Now()
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		end := !s.approved && s.attempts >= MaxAttempts
+		if end {
+			s.tooMany = true
+		}
+		s.mu.Unlock()
+		if end {
+			s.doneOnce.Do(func() { close(s.done) })
+		}
+	}()
 	own, err := NewKeyPair()
 	if err != nil {
 		return

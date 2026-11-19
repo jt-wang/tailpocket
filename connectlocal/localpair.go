@@ -16,18 +16,30 @@
 // The host closes the connection without a reply on any malformed line, other version (v1 included),
 // commitment mismatch or timeout. The commitment stops a machine in the middle from choosing its key
 // after it has seen the other side's: each attempt matches the two codes with probability 10^-6.
+// Throwing an attempt away and starting again is bounded too: a window gives its key to at most
+// MaxAttempts commitments (an honest phone needs one), at most one per source address every
+// SourceGap, and ends with ErrTooManyAttempts once that many have not been approved. So a window
+// lets a machine in the middle match the codes with probability at most MaxAttempts × 10^-6.
 package connectlocal
 
 import (
 	"errors"
 	"strconv"
+	"time"
 )
 
 const (
 	DefaultLabel = "tailpocket-local-pairing-v1"
 	MaxLine      = 4096
 	wireVersion  = 2
+	// MaxAttempts is how many commitments one window answers with its key.
+	MaxAttempts = 3
+	// SourceGap is the least time between two answers to the same source address.
+	SourceGap = 2 * time.Second
 )
+
+// sourceGap is SourceGap; tests that pair many times from loopback set it to 0.
+var sourceGap = SourceGap
 
 var (
 	ErrDenied      = errors.New("local pairing denied")
@@ -35,6 +47,9 @@ var (
 	ErrFailed      = errors.New("local pairing failed")
 	ErrNotApproved = errors.New("no phone was approved before the window closed")
 	ErrUnavailable = errors.New("no Wi-Fi/LAN address to serve local pairing on")
+	// ErrTooManyAttempts: MaxAttempts phones (or one machine trying again and again) got the host's
+	// key without being approved, so the window closed. Tell the user to start again.
+	ErrTooManyAttempts = errors.New("local pairing window closed after too many attempts")
 )
 
 func itoa(i int) string { return strconv.Itoa(i) }

@@ -144,7 +144,9 @@ route, Tailcat included:
 A window without `emoji` hands out only the v1 `qr` (Tailcat, as in v0.2). Same-Wi-Fi pairing
 without a camera (`pairing.local`) still shows a 6-digit code on both screens; from v0.3.0-pre.4 its
 wire protocol is version 2 (the phone commits to its key before it sees the computer's), so phone
-and computer must both be pre.4 or later.
+and computer must both be pre.4 or later. From pre.5 a window lets at most 3 phones try and then
+closes with `local-too-many-attempts` (Go: `connectlocal.ErrTooManyAttempts`, and the whole window
+ends): tell the user to start again. `ServeLocal` runs once per window.
 
 ### Relays (optional)
 
