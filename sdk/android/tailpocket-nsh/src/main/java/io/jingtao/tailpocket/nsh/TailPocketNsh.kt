@@ -20,7 +20,7 @@ object TailPocketNsh {
         val main = Handler(Looper.getMainLooper())
         val bridge = TailPocketBridge.create(
             view.context,
-            scanner = { prefix -> TailPocketQrScanActivity.scan(view.context, prefix) },
+            scanner = { prefixes -> TailPocketQrScanActivity.scan(view.context, prefixes) },
             emit = { event, data -> main.post { view.send(event, data) } },
         )
         for (name in bridge.names) {

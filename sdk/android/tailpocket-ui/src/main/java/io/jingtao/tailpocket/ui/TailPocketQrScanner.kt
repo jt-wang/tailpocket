@@ -34,7 +34,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  * permission itself; frames are decoded on the device and never stored.
  */
 @Composable
-fun TailPocketQrScanner(onInvite: (String) -> Unit, modifier: Modifier = Modifier, prefix: String = TailPocket.DEFAULT_PREFIX) {
+fun TailPocketQrScanner(onInvite: (String) -> Unit, modifier: Modifier = Modifier, prefix: String = TailPocket.DEFAULT_PREFIX) =
+    TailPocketQrScanner(prefixes = listOf(prefix), onInvite = onInvite, modifier = modifier)
+
+/** As above, for the first QR code with invite text for any of [prefixes], such as a v1 and a v2 prefix. */
+@Composable
+fun TailPocketQrScanner(prefixes: List<String>, onInvite: (String) -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     var granted by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
@@ -60,7 +65,7 @@ fun TailPocketQrScanner(onInvite: (String) -> Unit, modifier: Modifier = Modifie
                 try {
                     val plane = image.planes.firstOrNull()
                     val text = plane?.let { decoder.decode(it.buffer, image.width, image.height, it.rowStride, it.pixelStride) }
-                    val invite = text?.let { TailPocket.inviteText(it, prefix) }
+                    val invite = text?.let { TailPocket.inviteText(it, prefixes) }
                     if (invite != null && reported.compareAndSet(false, true)) ContextCompat.getMainExecutor(context).execute { onInvite(invite) }
                 } catch (_: Exception) {
                 } finally { image.close() }

@@ -9,12 +9,25 @@ export interface TailPocketTransport {
 }
 
 export interface TailPocketInvite { v: number; address: string; port: number; key: string; proof: string; expiresAt: number; name?: string }
-/** Store like a password: it holds the phone's private key. */
-export interface TailPocketHostLink { address: string; port: number; name: string; payload?: string | null; key: string }
+/** One way to reach a computer (v0.3). `m: "opaque"`: the relay carries the app's own encryption. */
+export interface TailPocketRoute { t: "tailcat" | "relay" | "lan" | string; a?: string[]; p?: number; u?: string; r?: string; m?: "opaque"; inv?: TailPocketInvite }
+/** A v2 invite (`tailpocket2:`): every route and the computer's end-to-end key. */
+export interface TailPocketInvite2 { v: 2; name?: string; exp: number; pk?: string; psk?: string; via: TailPocketRoute[] }
+/** Store like a password: it holds the phone's private key. `pk` and `via` (v0.3) arrive with `sync()` for links paired before v0.3;
+ *  a link paired over a relay may have no `address`. */
+export interface TailPocketHostLink { address?: string; port?: number; name: string; payload?: string | null; key: string; pk?: string; via?: TailPocketRoute[] }
+/** `direct` or `relay` over Tailcat, `relay` over your tailpocket-relay (`relay` is its host name), or `lan`. */
+export interface TailPocketPath { route: "direct" | "relay" | "lan" | string; relay: string }
 export interface TailPocketConnection {
   /** `http://127.0.0.1:<port>`: requests to it reach the computer's forwarded port. */
   baseUrl: string;
   port: number;
+  /** Registers this phone's end-to-end key over Tailcat (links from before v0.3) and returns the updated link; a link from the store is saved. */
+  sync(timeoutMs?: number): Promise<TailPocketHostLink>;
+  /** How the connection reaches the computer now; rejects with `revoked` once the computer removed this phone. */
+  path(timeoutMs?: number): Promise<TailPocketPath>;
+  /** The link with the computer's latest routes. */
+  link(): Promise<TailPocketHostLink>;
   close(): Promise<void>;
 }
 export interface TailPocketNearbyHost { name: string }
@@ -26,7 +39,8 @@ export interface TailPocketPendingPairing {
   cancel(): Promise<void>;
 }
 
-/** Codes: invalid-invite, expired, unreachable, denied, not-paired, unsupported, cancelled, … */
+/** Codes: invalid-invite, expired, unreachable, revoked (delete the link), mismatch, handshake-closed, denied, not-paired,
+ *  unsupported, cancelled, unknown-handle, … Only `revoked` means the computer removed this phone. */
 export class TailPocketError extends Error {
   code: string;
   constructor(code: string, message?: string) {
@@ -60,18 +74,28 @@ export function createTailPocket(transport: TailPocketTransport) {
     publicKey: (key: string) => call<string | null>("tailPocket.publicKey", { key }),
     inviteText: (text: string, prefix?: string) => call<string | null>("tailPocket.inviteText", prefix ? { text, prefix } : { text }),
     decodeInvite: (text: string, prefix?: string) => call<TailPocketInvite>("tailPocket.decodeInvite", prefix ? { text, prefix } : { text }),
+    /** A v2 invite, or a v1 one as a single tailcat route. */
+    decodeInvite2: (text: string, prefix?: string) => call<TailPocketInvite2>("tailPocket.decodeInvite2", prefix ? { text, prefix } : { text }),
 
     /** Shows the camera until a QR code with an invite is seen. */
-    scan: (prefix?: string) => call<string>("tailPocket.scan", prefix ? { prefix } : {}, 0),
+    /** The camera, until a QR with an invite: v1 or v2 with the default prefixes, else `prefix` (and `prefix2`, the app's v2 prefix). */
+    scan: (prefix?: string, prefix2?: string) => call<string>("tailPocket.scan", { ...(prefix ? { prefix } : {}), ...(prefix2 ? { prefix2 } : {}) }, 0),
 
-    /** Pairs with the computer that made `invite` (the QR text or a decoded TailPocketInvite). */
-    pair: (invite: string | TailPocketInvite, options: { device: string; save?: boolean; slot?: string; phoneKey?: string; timeoutMs?: number; derpMapUrl?: string }) =>
+    /** Pairs with the computer that made `invite` (the QR text, or a decoded invite) over whichever of its routes works. */
+    pair: (invite: string | TailPocketInvite | TailPocketInvite2, options: { device: string; save?: boolean; slot?: string; phoneKey?: string; timeoutMs?: number; derpMapUrl?: string }) =>
       call<TailPocketHostLink>("tailPocket.pair", { invite, ...options }, (options.timeoutMs ?? PAIR_TIMEOUT_MS) + SLACK_MS),
 
     /** Opens the tunnel to a saved (or given) computer. */
     connect: async (options: { link?: TailPocketHostLink; slot?: string; derpMapUrl?: string } = {}): Promise<TailPocketConnection> => {
       const c = await call<{ handle: number; port: number; baseUrl: string }>("tailPocket.connect", options);
-      return { baseUrl: c.baseUrl, port: c.port, close: () => call<void>("tailPocket.disconnect", { handle: c.handle }) };
+      const handle = c.handle;
+      return {
+        baseUrl: c.baseUrl, port: c.port,
+        sync: (timeoutMs?: number) => call<TailPocketHostLink>("tailPocket.sync", timeoutMs ? { handle, timeoutMs } : { handle }, (timeoutMs ?? 30_000) + SLACK_MS),
+        path: (timeoutMs?: number) => call<TailPocketPath>("tailPocket.path", timeoutMs ? { handle, timeoutMs } : { handle }, (timeoutMs ?? 5_000) + SLACK_MS),
+        link: () => call<TailPocketHostLink>("tailPocket.link", { handle }),
+        close: () => call<void>("tailPocket.disconnect", { handle }),
+      };
     },
 
     /** Lists computers advertising `service` on this Wi-Fi; resolves to a stop function. */

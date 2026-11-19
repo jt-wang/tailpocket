@@ -19,6 +19,7 @@ type nodeSpec struct {
 	region     *tailcfg.DERPRegion
 	allowed    []key.NodePublic
 	port       uint16
+	control    uint16 // a second port the node serves, 0 for none
 	onTCP      func(uint16) func(net.Conn)
 	derpMapURL string
 }
@@ -55,7 +56,7 @@ func realStart(ctx context.Context, s nodeSpec) (node, error) {
 		AllowedClients: s.allowed,
 		Logf:           func(string, ...any) {},
 		OnTCP:          s.onTCP,
-		ServedTCPPorts: []filter.PortRange{{First: s.port, Last: s.port}},
+		ServedTCPPorts: servedPorts(s),
 	}
 	errc := make(chan error, 1)
 	var once sync.Once
@@ -127,3 +128,11 @@ type tailcatAddr struct{}
 
 func (tailcatAddr) Network() string { return "tailcat" }
 func (tailcatAddr) String() string  { return "tailcat" }
+
+func servedPorts(s nodeSpec) []filter.PortRange {
+	out := []filter.PortRange{{First: s.port, Last: s.port}}
+	if s.control != 0 {
+		out = append(out, filter.PortRange{First: s.control, Last: s.control})
+	}
+	return out
+}

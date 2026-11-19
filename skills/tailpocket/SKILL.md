@@ -74,7 +74,7 @@ curl http://127.0.0.1:PORT/<a path the user's server answers>
 ## 4. The phone side
 
 Follow the paragraph for the user's phone stack in `docs/INTEGRATE.md` section 2 (Swift, Kotlin,
-React Native, NSH, browser). For every stack:
+React Native, NSH). For every stack:
 
 - Scan with the ready-made scanner and pairing screen unless the user already has a camera flow;
   any scanner works, since the QR text is decoded by `decodeInvite`.

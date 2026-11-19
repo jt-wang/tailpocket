@@ -3,6 +3,7 @@ package io.jingtao.tailpocket
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -23,15 +24,51 @@ data class TailPocketInvite(
     val name: String? = null,
 )
 
-/** Everything a paired phone needs to reach its computer. Holds the phone's private key: keep it in [TailPocketKeystoreStore]. */
+/** One way to reach a computer (v0.3): `tailcat`, `relay` (your tailpocket-relay) or `lan`. Phones skip types they do not know. */
+@Serializable
+data class TailPocketRoute(
+    val t: String,
+    val a: List<String>? = null,
+    val p: Int? = null,
+    val u: String? = null,
+    val r: String? = null,
+    /** "opaque": the relay carries the app's own encryption, not TailPocket's. */
+    val m: String? = null,
+    /** In an invite's tailcat route: the v1 pairing window. */
+    val inv: TailPocketInvite? = null,
+)
+
+/** A v2 invite (`tailpocket2:`): every route and the computer's end-to-end key. A v1 invite decodes as one tailcat route. */
+@Serializable
+data class TailPocketInvite2(
+    val v: Int,
+    val name: String? = null,
+    val exp: Long,
+    val pk: String? = null,
+    val psk: String? = null,
+    val via: List<TailPocketRoute>,
+)
+
+/** How a connection reaches its computer now: `direct` or `relay` (Tailcat), `relay` (tailpocket-relay, [relay] its host name), or `lan`. */
+@Serializable
+data class TailPocketPath(val route: String, val relay: String = "")
+
+/**
+ * Everything a paired phone needs to reach its computer. Holds the phone's private key: keep it in [TailPocketKeystoreStore].
+ * [hostKey] and [via] (v0.3) are the computer's end-to-end key and its routes besides Tailcat; a link paired before v0.3 has
+ * neither until [TailPocketConnection.sync], and one paired over a relay may have an empty [address]. Store the link again
+ * whenever [TailPocketConnection.sync] or [TailPocketConnection.currentLink] returns a new one.
+ */
 @Serializable
 data class TailPocketHostLink(
-    val address: String,
-    val port: Int,
+    val address: String = "",
+    val port: Int = 0,
     val name: String,
     /** What the computer's app sent along (a token, settings…), or null. */
     val payload: String? = null,
     val key: String,
+    @SerialName("pk") val hostKey: String? = null,
+    val via: List<TailPocketRoute>? = null,
 ) {
     fun encode(): String = json.encodeToString(serializer(), this)
 
@@ -42,7 +79,8 @@ data class TailPocketHostLink(
 
 /**
  * A failure with a fixed code: invalid-invite, invalid-key, invalid-link, expired, unauthorized, taken,
- * unreachable, denied, local-failed, cancelled, timeout, failed.
+ * unreachable, revoked, mismatch, handshake-closed, denied, local-failed, cancelled, timeout, unknown-handle, failed.
+ * Only "revoked" means the computer removed this phone: delete its link.
  */
 class TailPocketException(val code: String) : Exception(code)
 
@@ -50,6 +88,17 @@ class TailPocketException(val code: String) : Exception(code)
 class TailPocketConnection internal constructor(private val native: TailPocketNative, private val handle: Long, val port: Int) : AutoCloseable {
     private var closed = false
     val baseUrl: String get() = "http://127.0.0.1:$port"
+
+    /** The link with the computer's latest routes; store it when it differs from the saved one. */
+    fun currentLink(): TailPocketHostLink = decode(TailPocketHostLink.serializer(), native.link(handle))
+
+    /** Registers this phone's end-to-end key over Tailcat and returns the updated link to store. Links paired before v0.3 need it once; no new QR. */
+    suspend fun sync(timeoutMs: Long = 30_000): TailPocketHostLink =
+        withContext(Dispatchers.IO) { decode(TailPocketHostLink.serializer(), native.sync(handle, timeoutMs)) }
+
+    /** How the connection reaches the computer now. Throws "revoked" once the computer removed this phone. */
+    suspend fun path(timeoutMs: Long = 5_000): TailPocketPath =
+        withContext(Dispatchers.IO) { decode(TailPocketPath.serializer(), native.path(handle, timeoutMs)) }
 
     @Synchronized
     override fun close() {
@@ -96,6 +145,16 @@ class TailPocket private constructor(private val native: TailPocketNative) {
 
     fun decodeInvite(text: String, prefix: String = DEFAULT_PREFIX): TailPocketInvite = decode(TailPocketInvite.serializer(), native.decodeInvite(text, prefix))
 
+    /** Decodes a v2 invite with [prefix], or a v1 one (tailpocket1:) as a v2 invite with one tailcat route. */
+    fun decodeInvite2(text: String, prefix: String = DEFAULT_PREFIX2): TailPocketInvite2 = decode(TailPocketInvite2.serializer(), native.decodeInvite2(text, prefix))
+
+    /** Pairs over whichever of the invite's routes works first; returns the [TailPocketHostLink] to store. */
+    suspend fun pair(invite: TailPocketInvite2, phoneKey: String, device: String, derpMapUrl: String = "", timeoutMs: Long = 90_000): TailPocketHostLink {
+        val op = ops.incrementAndGet()
+        val text = json.encodeToString(TailPocketInvite2.serializer(), invite)
+        return decode(TailPocketHostLink.serializer(), blocking(native, op) { native.pair2(op, text, phoneKey, device, derpMapUrl, timeoutMs) })
+    }
+
     /** Joins the computer's pairing window; returns the [TailPocketHostLink] to store. */
     suspend fun pair(invite: TailPocketInvite, phoneKey: String, device: String, derpMapUrl: String = "", timeoutMs: Long = 90_000): TailPocketHostLink {
         val op = ops.incrementAndGet()
@@ -122,12 +181,17 @@ class TailPocket private constructor(private val native: TailPocketNative) {
 
     companion object {
         const val DEFAULT_PREFIX = "tailpocket1:"
+        /** The prefix of v2 invites (v0.3), which carry every route. */
+        const val DEFAULT_PREFIX2 = "tailpocket2:"
 
         /** The SDK backed by the bundled native library. */
         val default: TailPocket by lazy { TailPocket(GoNative) }
 
         /** The SDK over another native layer (tests). */
         fun with(native: TailPocketNative) = TailPocket(native)
+
+        /** The first of [prefixes] found in [text] wins. */
+        fun inviteText(text: String, prefixes: List<String>): String? = prefixes.firstNotNullOfOrNull { inviteText(text, it) }
 
         /** Finds invite text in scanned or pasted text: a bare code, or a link containing it. */
         fun inviteText(text: String, prefix: String = DEFAULT_PREFIX): String? {

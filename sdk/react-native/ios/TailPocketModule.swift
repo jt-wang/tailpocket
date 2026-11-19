@@ -8,9 +8,9 @@ import TailPocketUI
 final class TailPocketModule: RCTEventEmitter {
     private var listening = false
     private lazy var tailPocket = TailPocketBridge(
-        scanner: { prefix in
+        scanner: { prefixes in
             guard #available(iOS 16.0, *) else { throw TailPocketError(code: "unsupported") }
-            return try await TailPocketQRScanner.scan(from: await MainActor.run { RCTPresentedViewController() }, prefix: prefix)
+            return try await TailPocketQRScanner.scan(from: await MainActor.run { RCTPresentedViewController() }, prefixes: prefixes)
         },
         emit: { [weak self] event, data in
             DispatchQueue.main.async { if self?.listening == true { self?.sendEvent(withName: event, body: data) } }

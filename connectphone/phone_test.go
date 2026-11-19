@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -66,7 +67,7 @@ func TestLinkJSONRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	back, err := ParseLink(text)
-	if err != nil || back != l {
+	if err != nil || !reflect.DeepEqual(back, l) {
 		t.Fatalf("%+v %v", back, err)
 	}
 	if _, err := ParseLink(`{"address":"x"}`); err == nil {

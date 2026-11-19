@@ -1,0 +1,8 @@
+# Used by BuildKit for Dockerfile next to it; the build context is the repository root.
+*
+!go.mod
+!go.sum
+!connectrelay/
+!cmd/tailpocket-relay/
+**/*_test.go
+**/testdata/

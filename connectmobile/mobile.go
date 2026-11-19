@@ -1,8 +1,10 @@
 // Package connectmobile is the gomobile face of the phone SDK for iOS (xcframework) and Android (AAR).
 // Every function takes and returns strings or numbers, never throws, and reports failures as
 // {"error":"<code>"} with a fixed code: invalid-invite, invalid-key, invalid-link, expired,
-// unauthorized, taken, unreachable, denied, local-failed, cancelled, timeout, unknown-operation,
-// failed. Blocking calls (Pair, LocalPairStart, LocalPairFinish) must run off the main thread;
+// unauthorized, taken, unreachable, revoked, mismatch, handshake-closed, denied, local-failed,
+// cancelled, timeout,
+// unknown-operation, unknown-handle, failed. "revoked" comes only from the host's encrypted bye:
+// delete the link. Every other code keeps it. Blocking calls (Pair, LocalPairStart, LocalPairFinish) must run off the main thread;
 // pass a caller-chosen op number to cancel them with Cancel(op).
 package connectmobile
 
@@ -17,6 +19,7 @@ import (
 	"github.com/jt-wang/tailpocket/connectinvite"
 	"github.com/jt-wang/tailpocket/connectlocal"
 	"github.com/jt-wang/tailpocket/connectphone"
+	"github.com/jt-wang/tailpocket/connectsecure"
 )
 
 func fail(code string) string { return `{"error":"` + code + `"}` }
@@ -31,8 +34,14 @@ func code(err error) string {
 		return "timeout"
 	case errors.Is(err, connectinvite.ErrInvalid):
 		return "invalid-invite"
+	case errors.Is(err, connectphone.ErrRevoked):
+		return "revoked"
 	case errors.Is(err, connectphone.ErrUnauthorized):
 		return "unauthorized"
+	case errors.Is(err, connectsecure.ErrProtoMismatch):
+		return "mismatch" // update the app or the computer
+	case errors.Is(err, connectsecure.ErrHandshakeClosed):
+		return "handshake-closed" // the computer is not running, or pinned another key: check, then pair again
 	case errors.Is(err, connectphone.ErrTaken):
 		return "taken"
 	case errors.Is(err, connectphone.ErrUnreachable):
@@ -63,6 +72,23 @@ func DecodeInvite(text, prefix string) string {
 		prefix = connectinvite.DefaultPrefix
 	}
 	inv, err := connectinvite.Decode(text, prefix)
+	if err != nil {
+		return fail("invalid-invite")
+	}
+	body, _ := json.Marshal(inv)
+	return string(body)
+}
+
+// DecodeInvite2 parses scanned QR or link text into v2 invite JSON for Pair2: a v2 invite with
+// prefix ("" for tailpocket2:), or a v1 invite with tailpocket1:, read as one tailcat route.
+func DecodeInvite2(text, prefix string) string {
+	if prefix == "" {
+		prefix = connectinvite.DefaultPrefix2
+	}
+	inv, err := connectinvite.DecodeV2(text, prefix)
+	if err != nil {
+		inv, err = connectinvite.DecodeV2(text, connectinvite.DefaultPrefix)
+	}
 	if err != nil {
 		return fail("invalid-invite")
 	}
@@ -152,6 +178,35 @@ func Pair(op int64, inviteJSON, phoneKey, device, derpMapURL string, timeoutMs i
 	return text
 }
 
+// Pair2 pairs from v2 invite JSON (DecodeInvite2) over whichever of its routes works and returns the
+// Link JSON to store. Blocking.
+func Pair2(op int64, inviteJSON, phoneKey, device, derpMapURL string, timeoutMs int) string {
+	var inv connectinvite.V2
+	if json.Unmarshal([]byte(inviteJSON), &inv) != nil || inv.Validate() != nil {
+		return fail("invalid-invite")
+	}
+	if PublicKey(phoneKey) == "" {
+		return fail("invalid-key")
+	}
+	if inv.Expired(time.Now()) {
+		return fail("expired")
+	}
+	ctx, _, ok := begin(op, timeoutOf(timeoutMs))
+	if !ok {
+		return fail("failed")
+	}
+	defer end(op)
+	link, err := connectphone.PairV2(ctx, inv, phoneKey, connectphone.Options{Device: device, DERPMapURL: derpMapURL})
+	if err != nil {
+		return fail(code(err))
+	}
+	text, err := link.Encode()
+	if err != nil {
+		return fail("failed")
+	}
+	return text
+}
+
 // LocalPairStart connects to a host found over Bonjour ("ip:port") and returns {"code":"123456"}
 // for the phone to show. Then call LocalPairFinish(op, …) for the invite.
 func LocalPairStart(op int64, address, label, device string) string {
@@ -203,6 +258,12 @@ type connection struct {
 	forward *connectphone.Forward
 }
 
+func lookup(handle int64) *connection {
+	connMu.Lock()
+	defer connMu.Unlock()
+	return conns[handle]
+}
+
 var (
 	connMu     sync.Mutex
 	nextHandle int64 = 1
@@ -231,6 +292,62 @@ func Connect(linkJSON, derpMapURL string) string {
 	conns[h] = &connection{session: s, forward: f}
 	connMu.Unlock()
 	body, _ := json.Marshal(map[string]int64{"handle": h, "port": int64(f.Port())})
+	return string(body)
+}
+
+// Link returns the handle's Link JSON as it is now: the host may have sent new routes since Connect.
+// Store it in place of the old one when it differs.
+func Link(handle int64) string {
+	c := lookup(handle)
+	if c == nil {
+		return fail("unknown-handle")
+	}
+	text, err := c.session.Link().Encode()
+	if err != nil {
+		return fail("failed")
+	}
+	return text
+}
+
+// Sync registers this phone's end-to-end key with the host over Tailcat and returns the updated Link
+// JSON (host key and routes) to store. A link paired before v0.3 needs it once to use the relay and
+// lan routes; no new QR. Blocking.
+func Sync(handle int64, timeoutMs int) string {
+	c := lookup(handle)
+	if c == nil {
+		return fail("unknown-handle")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeoutOf(timeoutMs))
+	defer cancel()
+	link, err := c.session.Sync(ctx)
+	if err != nil {
+		return fail(code(err))
+	}
+	text, err := link.Encode()
+	if err != nil {
+		return fail("failed")
+	}
+	return text
+}
+
+// Path reports how the handle reaches its host: {"route":"direct"|"relay"|"lan","relay":"<name>"}.
+// Blocking (a Tailcat disco ping, at most timeoutMs). {"error":"revoked"} once the host has said the
+// phone is no longer paired: the forward's connections then close at once; delete the link.
+func Path(handle int64, timeoutMs int) string {
+	c := lookup(handle)
+	if c == nil {
+		return fail("unknown-handle")
+	}
+	if c.session.Revoked() {
+		return fail("revoked")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeoutOf(timeoutMs))
+	defer cancel()
+	route, relay, err := c.session.Path(ctx)
+	if err != nil {
+		return fail(code(err))
+	}
+	body, _ := json.Marshal(map[string]string{"route": route, "relay": relay})
 	return string(body)
 }
 

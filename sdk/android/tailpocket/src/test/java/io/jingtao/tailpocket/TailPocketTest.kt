@@ -20,6 +20,17 @@ class TailPocketTest {
         override fun localPairStart(op: Long, address: String, label: String, device: String) = """{"code":"123456"}"""
         override fun localPairFinish(op: Long, timeoutMs: Long) = """{"v":1,"address":"tcB","port":48932,"key":"k","proof":"p","expiresAt":9}"""
         override fun cancel(op: Long) { cancelled += op }
+
+        override fun decodeInvite2(text: String, prefix: String) = if (text.startsWith(prefix) || text.startsWith("tailpocket1:"))
+            """{"v":2,"name":"Mac","exp":9,"via":[{"t":"relay","u":"wss://relay.example.com","r":"AAAAAAAAAAAAAAAAAAAAAA","m":"opaque"}]}""" else """{"error":"invalid-invite"}"""
+        var paired2 = ""
+        override fun pair2(op: Long, invite: String, key: String, device: String, derp: String, timeoutMs: Long): String {
+            paired2 = invite
+            return """{"name":"Mac","payload":"t","key":"$key","pk":"PK","via":[{"t":"relay","u":"wss://relay.example.com","r":"R"}]}"""
+        }
+        override fun sync(handle: Long, timeoutMs: Long) = """{"address":"tcM","port":48931,"name":"Mac","key":"privkey:1","pk":"PK","via":[{"t":"relay","u":"wss://relay.example.com","r":"R"}]}"""
+        override fun link(handle: Long) = sync(handle, 0)
+        override fun path(handle: Long, timeoutMs: Long) = if (handle == 4L) """{"route":"relay","relay":"relay.example.com"}""" else """{"error":"revoked"}"""
     }
 
     @Test fun keys() {
@@ -44,6 +55,25 @@ class TailPocketTest {
         val link = tc.pair(tc.decodeInvite("tailpocket1:x"), "privkey:1", "Pixel")
         assertEquals("t", link.payload)
         assertEquals(link, TailPocketHostLink.decode(link.encode()))
+    }
+
+    // A relay-only link has no Tailcat address and must not encode one; a v0.2 link reads with no key or routes.
+    @Test fun v3LinkShapes() = runTest {
+        val tc = TailPocket.with(FakeNative())
+        val link = tc.pair(tc.decodeInvite2("tailpocket2:x"), "privkey:1", "Pixel")
+        assertEquals("", link.address)
+        assertEquals("PK", link.hostKey)
+        val text = link.encode()
+        assertEquals(false, text.contains("\"address\""))
+        assertEquals(true, text.contains("\"pk\":\"PK\""))
+        assertEquals(link, TailPocketHostLink.decode(text))
+        val old = TailPocketHostLink.decode("""{"address":"tcX","port":48931,"name":"Mac","key":"privkey:x"}""")
+        assertNull(old.hostKey)
+        assertNull(old.via)
+        val c = tc.connect(old)
+        assertEquals("PK", c.sync().hostKey)
+        assertEquals("relay", c.path().route)
+        c.close()
     }
 
     @Test fun connectGivesALocalUrl() {

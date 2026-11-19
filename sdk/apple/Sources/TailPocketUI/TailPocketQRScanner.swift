@@ -9,11 +9,16 @@ import TailPocket
 public struct TailPocketQRScanner: UIViewControllerRepresentable {
     public static var isAvailable: Bool { DataScannerViewController.isSupported && DataScannerViewController.isAvailable }
 
-    private let prefix: String
+    private let prefixes: [String]
     private let onInvite: (String) -> Void
 
     public init(prefix: String = TailPocket.defaultPrefix, onInvite: @escaping (String) -> Void) {
-        self.prefix = prefix
+        self.init(prefixes: [prefix], onInvite: onInvite)
+    }
+
+    /// Reports the first QR code with invite text for any of `prefixes`, such as a v1 and a v2 prefix.
+    public init(prefixes: [String], onInvite: @escaping (String) -> Void) {
+        self.prefixes = prefixes
         self.onInvite = onInvite
     }
 
@@ -31,19 +36,19 @@ public struct TailPocketQRScanner: UIViewControllerRepresentable {
         controller.stopScanning()
     }
 
-    public func makeCoordinator() -> Coordinator { Coordinator(prefix: prefix, onInvite: onInvite) }
+    public func makeCoordinator() -> Coordinator { Coordinator(prefixes: prefixes, onInvite: onInvite) }
 
     public final class Coordinator: NSObject, DataScannerViewControllerDelegate {
-        let prefix: String
+        let prefixes: [String]
         let onInvite: (String) -> Void
         var reported = false
 
-        init(prefix: String, onInvite: @escaping (String) -> Void) { self.prefix = prefix; self.onInvite = onInvite }
+        init(prefixes: [String], onInvite: @escaping (String) -> Void) { self.prefixes = prefixes; self.onInvite = onInvite }
 
         public func dataScanner(_ scanner: DataScannerViewController, didAdd items: [RecognizedItem], allItems: [RecognizedItem]) {
             for item in items {
                 guard !reported, case let .barcode(code) = item, let text = code.payloadStringValue,
-                      let invite = TailPocket.inviteText(in: text, prefix: prefix) else { continue }
+                      let invite = TailPocket.inviteText(in: text, prefixes: prefixes) else { continue }
                 reported = true
                 onInvite(invite)
             }
@@ -59,6 +64,12 @@ extension TailPocketQRScanner {
     /// Throws `unsupported` without a usable camera and `cancelled` when the person cancels.
     @MainActor
     public static func scan(from presenter: UIViewController?, prefix: String = TailPocket.defaultPrefix) async throws -> String {
+        try await scan(from: presenter, prefixes: [prefix])
+    }
+
+    /// As `scan(from:prefix:)`, for the first invite with any of `prefixes`.
+    @MainActor
+    public static func scan(from presenter: UIViewController?, prefixes: [String]) async throws -> String {
         guard isAvailable, let presenter = presenter.map(topmost) else { throw TailPocketError(code: "unsupported") }
         return try await withCheckedThrowingContinuation { continuation in
             var done = false
@@ -70,7 +81,7 @@ extension TailPocketQRScanner {
                 continuation.resume(with: result)
             }
             let screen = NavigationView {
-                TailPocketQRScanner(prefix: prefix) { finish(.success($0)) }
+                TailPocketQRScanner(prefixes: prefixes) { finish(.success($0)) }
                     .ignoresSafeArea()
                     .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { finish(.failure(TailPocketError(code: "cancelled"))) } } }
             }

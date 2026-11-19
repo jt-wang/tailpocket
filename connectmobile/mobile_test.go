@@ -108,3 +108,28 @@ func TestCancelUnknownIsNoop(t *testing.T) {
 		t.Fatal("unknown op")
 	}
 }
+
+func TestV2CallsReportCodes(t *testing.T) {
+	if errorOf(t, DecodeInvite2("tailpocket2:junk", "")) != "invalid-invite" {
+		t.Fatal("junk decoded")
+	}
+	if got := errorOf(t, Pair2(3, "{}", NewKey(), "x", "", 1000)); got != "invalid-invite" {
+		t.Fatalf("Pair2: %q", got)
+	}
+	for _, out := range []string{Link(999), Sync(999, 10), Path(999, 10)} {
+		if errorOf(t, out) != "unknown-handle" {
+			t.Fatalf("unknown handle: %s", out)
+		}
+	}
+	// A v1 QR decodes as a v2 invite with one tailcat route.
+	inv := connectinvite.Invite{Version: 1, Address: testAddress(t), Port: 48932, Key: NewKey(), Proof: connectinvite.NewProof(),
+		ExpiresAt: time.Now().Add(time.Minute).Unix(), Name: "Mac"}
+	qr, err := connectinvite.Encode(inv, connectinvite.DefaultPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v2 connectinvite.V2
+	if json.Unmarshal([]byte(DecodeInvite2(qr, "")), &v2) != nil || len(v2.Via) != 1 || v2.Via[0].T != connectinvite.RouteTailcat {
+		t.Fatalf("v1 as v2: %s", DecodeInvite2(qr, ""))
+	}
+}

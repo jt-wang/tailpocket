@@ -45,7 +45,6 @@ make or support it.
 | Computer | Node, or any language that can spawn a process | `sdk/node`, or the `tailpocket-host` helper over stdin/stdout |
 | Phone | Swift (iOS 15+, macOS 13+) | Swift package `TailPocket`, plus `TailPocketUI` (QR scanner, pairing view) |
 | Phone | Kotlin (Android 8+) | `tailpocket`, plus `tailpocket-ui` (Compose QR scanner, pairing screen) |
-| Phone | Browser / PWA | `sdk/web` (WebAssembly) |
 | Phone | NSH | `sdk/js/nsh.ts`, plus the native adapters `TailPocketNSH` (iOS) and `tailpocket-nsh` (Android) |
 | Phone | React Native | `sdk/react-native` |
 | Phone | Go, or a command line | `connectphone`, `tailpocket-phone` |
@@ -147,10 +146,9 @@ Measured with an Apple-silicon Mac as the computer, over Tailcat's default relay
 - Same-Wi-Fi pairing through real Bonjour.
 - End to end against the Node example host: the Swift package on macOS, the iOS Simulator (Swift
   the NSH app and the React Native app), an Android emulator (Kotlin, the NSH app and the React
-  Native app), and the WebAssembly build in Node. The browser page paired and fetched from a real
-  Chrome tab.
+  Native app).
 - Unit tests in every package (`go test ./...`, `swift test`, `./gradlew test`, `npm test` in
-  `sdk/node`, `sdk/web`, `sdk/js` and `sdk/react-native`, `nsh test` in `examples/nsh-phone`).
+  `sdk/node`, `sdk/js` and `sdk/react-native`, `nsh test` in `examples/nsh-phone`).
 - A physical Android phone: scanned the QR code and connected over cellular.
 
 Not tested yet: physical iPhones, Linux and Windows hosts (the binaries build),

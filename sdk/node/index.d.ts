@@ -4,6 +4,34 @@ export interface TailPocketHostState {
   /** Contains the node's private keys: store it like a password. */
   identity: string;
   allowed: string[];
+  /** Each phone's Noise key for the end-to-end encrypted routes (v0.3). Pass it back as options.keys. */
+  keys?: Record<string, string>;
+}
+
+/** A tailpocket-relay the host registers with. */
+export interface TailPocketRelay {
+  /** wss://…; ws:// only to a loopback address. */
+  url: string;
+  token: string;
+  /** Pass the phone's bytes to `forward` without TailPocket's encryption (your app runs its own pinned TLS). */
+  opaque?: boolean;
+}
+
+export interface TailPocketRoute {
+  t: 'tailcat' | 'relay' | 'lan' | string;
+  a?: string[];
+  p?: number;
+  u?: string;
+  r?: string;
+  m?: 'opaque';
+}
+
+export interface TailPocketAuditEvent {
+  kind: 'paired' | 'revoked' | 'conn-open' | 'conn-close' | 'denied' | string;
+  phone: string;
+  route: string;
+  reason?: string;
+  time: Date;
 }
 
 export interface TailPocketHostOptions {
@@ -14,6 +42,14 @@ export interface TailPocketHostOptions {
   /** Restore a previous TailPocketHostState. */
   identity?: string;
   allowed?: string[];
+  keys?: Record<string, string>;
+  relays?: TailPocketRelay[];
+  /** Addresses ("192.168.1.20:7681") phones reach directly, end-to-end encrypted. Not 0.0.0.0. */
+  listen?: string[];
+  /** Decide each connection from a paired phone; false (or no answer in 5 s) closes it. */
+  authorize?(phone: string, route: string): Promise<boolean> | boolean;
+  /** Pairings, revokes, sessions and refusals. Never keys, codes or payloads. */
+  audit?(event: TailPocketAuditEvent): void;
   /** Shown on the phone while pairing. Default: the hostname. */
   name?: string;
   /** Write "nodekey:…\n" (the phone's key) as the first line of each forwarded connection. */
@@ -33,6 +69,8 @@ export interface TailPocketPairOptions {
   payload?: string;
   /** Prefix of the QR text (default "tailpocket1:"). The phone must use the same. */
   qrPrefix?: string;
+  /** Prefix of the v2 QR text (default "tailpocket2:"). */
+  qrPrefix2?: string;
 }
 
 export interface TailPocketPhone { phone: string; device: string }
@@ -53,6 +91,9 @@ export interface TailPocketPairing {
   /** Text for a QR code or link. Anyone holding it can pair until it expires. */
   qr: string;
   invite: Record<string, unknown>;
+  /** v2 invite for v0.3 phones: every route, the host's Noise key. Same secret as `qr`. */
+  qr2: string;
+  invite2: Record<string, unknown>;
   expiresAt: Date;
   paired: Promise<TailPocketPhone>;
   closed: Promise<'paired' | 'expired' | 'stopped' | string>;
@@ -73,5 +114,7 @@ export class TailPocketHost extends EventEmitter {
   pair(options?: TailPocketPairOptions): Promise<TailPocketPairing>;
   setAllowed(phones: string[]): Promise<void>;
   revoke(phone: string): Promise<void>;
+  disconnect(phone: string): Promise<void>;
+  status(): Promise<{ address: string; routes: TailPocketRoute[]; relays: Record<string, string> }>;
   close(): Promise<void>;
 }

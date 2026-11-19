@@ -10,7 +10,6 @@ git clone https://github.com/jt-wang/tailpocket && cd tailpocket
 ./scripts/build-mobile.sh apple       # → build/apple/TailPocketMobile.xcframework
 ./scripts/build-mobile.sh android     # → build/android/tailpocket-mobile.aar and the Maven repository build/android/m2
 (cd sdk/android && ./gradlew publish) # → the Kotlin libraries into build/android/m2
-./scripts/build-web.sh                # → sdk/web/dist (browser / PWA phones)
 ```
 
 With `build/apple/TailPocketMobile.xcframework` present, `Package.swift` uses it instead of the release's download.
@@ -23,6 +22,6 @@ Packages can then be used from the checkout: `npm install <checkout>/sdk/node`, 
 
 ## Tests
 
-`go test ./...`, `swift test`, `./gradlew test` in `sdk/android`, `npm test` in `sdk/node`, `sdk/web`, `sdk/js` and
+`go test ./...`, `swift test`, `./gradlew test` in `sdk/android`, `npm test` in `sdk/node`, `sdk/js` and
 `sdk/react-native`. The `scripts/e2e-*.sh` scripts pair the examples with a real host on an Android emulator or the iOS
 Simulator.

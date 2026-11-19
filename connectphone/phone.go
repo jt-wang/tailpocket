@@ -31,17 +31,28 @@ var (
 
 // Link is everything a paired phone needs to reach its host. Key is the phone's private key and
 // Address embeds the host's pre-shared key: store the whole Link in the Keychain/Keystore.
+//
+// HostKey and Via (v0.3) are the host's Noise key and the routes besides Tailcat. A link from an
+// older pairing has neither until Session.Sync fetches them over Tailcat; a link paired over a relay
+// may have no Tailcat Address at all.
 type Link struct {
-	Address string `json:"address"`
-	Port    int    `json:"port"`
-	Name    string `json:"name"`
-	Payload string `json:"payload,omitempty"`
-	Key     string `json:"key"`
+	Address string                `json:"address,omitempty"`
+	Port    int                   `json:"port,omitempty"`
+	Name    string                `json:"name"`
+	Payload string                `json:"payload,omitempty"`
+	Key     string                `json:"key"`
+	HostKey string                `json:"pk,omitempty"`
+	Via     []connectinvite.Route `json:"via,omitempty"`
 }
 
 func (l Link) validate() error {
-	if !connectinvite.ValidAddress(l.Address) || l.Port < 1 || l.Port > 65535 || !connectinvite.ValidName(l.Name) {
-		return errors.New("connectphone: invalid link")
+	bad := errors.New("connectphone: invalid link")
+	tailcatOK := connectinvite.ValidAddress(l.Address) && l.Port >= 1 && l.Port <= 65535
+	if (!tailcatOK && (l.Address != "" || len(l.Via) == 0)) || !connectinvite.ValidName(l.Name) {
+		return bad
+	}
+	if (l.HostKey != "" && !connectinvite.ValidKey(l.HostKey)) || connectinvite.ValidateRoutes(l.Via) != nil {
+		return bad
 	}
 	if _, err := parsePrivate(l.Key); err != nil {
 		return err
@@ -96,14 +107,20 @@ type Options struct {
 	Device string
 	// DERPMapURL must match the host's when it uses its own relays.
 	DERPMapURL string
+	// HTTPClient dials tailpocket-relay servers; nil means http.DefaultClient.
+	HTTPClient *http.Client
+	// OnLink gets the session's Link each time the host sends new routes or Sync takes them; store it.
+	OnLink func(Link)
 }
 
 type reply struct {
-	V       int    `json:"v"`
-	Address string `json:"address"`
-	Port    int    `json:"port"`
-	Name    string `json:"name"`
-	Payload string `json:"payload"`
+	V       int                   `json:"v"`
+	Address string                `json:"address"`
+	Port    int                   `json:"port"`
+	Name    string                `json:"name"`
+	Payload string                `json:"payload"`
+	PK      string                `json:"pk"`
+	Via     []connectinvite.Route `json:"via"`
 }
 
 func (r reply) link(phoneKey string) (Link, error) {
@@ -113,6 +130,12 @@ func (r reply) link(phoneKey string) (Link, error) {
 	l := Link{Address: r.Address, Port: r.Port, Name: r.Name, Payload: r.Payload, Key: phoneKey}
 	if !connectinvite.ValidAddress(l.Address) || l.Port < 1 || l.Port > 65535 || !connectinvite.ValidName(l.Name) {
 		return Link{}, errors.New("connectphone: invalid host reply")
+	}
+	// A host that sends the encrypted routes holds this phone's Noise key; ones that look wrong are
+	// dropped, and Tailcat still works.
+	if connectinvite.ValidKey(r.PK) && connectinvite.ValidateRoutes(r.Via) == nil {
+		l.HostKey = r.PK
+		l.setRoutes(r.Via)
 	}
 	return l, nil
 }
@@ -137,6 +160,8 @@ func Pair(ctx context.Context, inv connectinvite.Invite, phoneKey string, opts O
 	port := uint16(inv.Port)
 	httpClient := &http.Client{Transport: &http.Transport{DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return client.DialTCPPort(ctx, port) }}}
+	// No Noise key here: the pairing node admits the invite's one-time key, so nothing on this
+	// connection proves the nodekey. The key goes over the main node with Sync, where it does.
 	body, _ := json.Marshal(map[string]string{"phoneKey": private.Public().String(), "device": connectinvite.CleanName(opts.Device)})
 	deadline := time.Unix(inv.ExpiresAt, 0)
 	ctx, cancel := context.WithDeadline(ctx, deadline)
@@ -186,45 +211,6 @@ func Pair(ctx context.Context, inv connectinvite.Invite, phoneKey string, opts O
 		}
 	}
 }
-
-// Session reaches the host of one Link. It is safe for concurrent use.
-type Session struct {
-	link   Link
-	client *tailcat.Client
-}
-
-// Connect prepares a session; nothing goes over the network until the first Dial.
-func Connect(link Link, opts Options) (*Session, error) {
-	if err := link.validate(); err != nil {
-		return nil, err
-	}
-	private, _ := parsePrivate(link.Key)
-	return &Session{link: link, client: &tailcat.Client{Server: tailcat.Addr(link.Address), Key: private,
-		Logf: func(string, ...any) {}, DERPMapURL: opts.DERPMapURL}}, nil
-}
-
-// Dial opens one connection to the host's app.
-// On failure it returns a nil net.Conn: Tailcat returns a failed dial as a nil *gonet.TCPConn
-// inside a non-nil net.Conn (tailcat v0.6.0, tailcat.go:1895), whose Close panics.
-func (s *Session) Dial(ctx context.Context) (net.Conn, error) {
-	c, err := s.client.DialTCPPort(ctx, uint16(s.link.Port))
-	if err != nil {
-		return nil, err
-	}
-	return c, nil
-}
-
-// Forward listens on 127.0.0.1 and carries every accepted connection to the host, for HTTP or
-// WebSocket stacks that need a plain address ("http://127.0.0.1:<port>").
-func (s *Session) Forward() (*Forward, error) {
-	return startForward(func(ctx context.Context) (net.Conn, error) {
-		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		defer cancel()
-		return s.Dial(ctx)
-	})
-}
-
-func (s *Session) Close() error { return s.client.Close() }
 
 // Discover lists hosts advertising service on this Wi-Fi.
 func Discover(ctx context.Context, service string) (<-chan connectmdns.Entry, error) {

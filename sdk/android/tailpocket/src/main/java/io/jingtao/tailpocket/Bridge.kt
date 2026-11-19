@@ -38,12 +38,13 @@ class TailPocketBridge(
     private val sdk: TailPocket,
     private val store: TailPocketLinkStore,
     private val nearbyFor: (service: String) -> TailPocketNearbySource,
-    /** Shows a QR scanner and returns the scanned text; null makes "tailPocket.scan" fail with "unsupported". */
-    private val scanner: (suspend (prefix: String) -> String)? = null,
+    /** Shows a QR scanner and returns the first invite text with one of the prefixes; null makes "tailPocket.scan" fail with "unsupported". */
+    private val scanner: (suspend (prefixes: List<String>) -> String)? = null,
     private val emit: (event: String, data: Any?) -> Unit = { _, _ -> },
 ) {
     private var nearby: TailPocketNearbySource? = null
-    private val connections = ConcurrentHashMap<Long, TailPocketConnection>()
+    /** Open connections, with the store slot their link came from (null for a link passed in). */
+    private val connections = ConcurrentHashMap<Long, Pair<TailPocketConnection, String?>>()
     private val pending = ConcurrentHashMap<Long, TailPocketPendingLocalPairing>()
     private val ops = AtomicLong()
 
@@ -52,10 +53,17 @@ class TailPocketBridge(
         "tailPocket.publicKey" to { a -> sdk.publicKey(a.string("key")) },
         "tailPocket.inviteText" to { a -> TailPocket.inviteText(a.string("text"), a.prefix()) },
         "tailPocket.decodeInvite" to { a -> toValue(TailPocketInvite.serializer(), sdk.decodeInvite(a.string("text"), a.prefix())) },
+        "tailPocket.decodeInvite2" to { a ->
+            toValue(TailPocketInvite2.serializer(), sdk.decodeInvite2(a.string("text"), a.optString("prefix") ?: TailPocket.DEFAULT_PREFIX2))
+        },
         "tailPocket.pair" to { a ->
+            // Text and v2 objects pair over every route (a v1 text as its one tailcat route); a v1 object over Tailcat.
             val invite = when (val i = a["invite"]) {
-                is String -> sdk.decodeInvite(TailPocket.inviteText(i, a.prefix()) ?: i, a.prefix())
-                is Map<*, *> -> fromValue(TailPocketInvite.serializer(), i)
+                is String -> sdk.decodeInvite2(TailPocket.inviteText(i, a.prefix()) ?: i, a.prefix())
+                is Map<*, *> -> if ((i["v"] as? Number)?.toInt() == 2) fromValue(TailPocketInvite2.serializer(), i) else {
+                    val v1 = fromValue(TailPocketInvite.serializer(), i)
+                    TailPocketInvite2(v = 2, name = v1.name, exp = v1.expiresAt, via = listOf(TailPocketRoute(t = "tailcat", inv = v1)))
+                }
                 else -> throw TailPocketException("invalid-arguments")
             }
             val key = (a["phoneKey"] as? String) ?: store.phoneKey()
@@ -64,17 +72,33 @@ class TailPocketBridge(
             toValue(TailPocketHostLink.serializer(), link)
         },
         "tailPocket.connect" to { a ->
+            var slot: String? = null
             val link = when (val l = a["link"]) {
                 is Map<*, *> -> fromValue(TailPocketHostLink.serializer(), l)
-                null -> store.link(a.optString("slot") ?: "default") ?: throw TailPocketException("not-paired")
+                null -> (a.optString("slot") ?: "default").let { s -> slot = s; store.link(s) } ?: throw TailPocketException("not-paired")
                 else -> throw TailPocketException("invalid-arguments")
             }
             val c = sdk.connect(link, a.optString("derpMapUrl") ?: "")
             val handle = ops.incrementAndGet()
-            connections[handle] = c
+            connections[handle] = c to slot
             mapOf("handle" to handle, "port" to c.port, "baseUrl" to c.baseUrl)
         },
-        "tailPocket.disconnect" to { a -> connections.remove(a.long("handle") ?: -1)?.close(); null },
+        "tailPocket.disconnect" to { a ->
+            connections.remove(a.long("handle") ?: -1)?.let { (c, slot) ->
+                // Keep the routes the computer sent meanwhile, for a link that came from the store.
+                if (slot != null) runCatching { c.currentLink() }.getOrNull()?.let { latest -> if (latest != store.link(slot)) store.saveLink(latest, slot) }
+                c.close()
+            }
+            null
+        },
+        "tailPocket.sync" to { a ->
+            val (c, slot) = connection(a)
+            val link = c.sync(a.long("timeoutMs") ?: 30_000)
+            if (slot != null) store.saveLink(link, slot)
+            toValue(TailPocketHostLink.serializer(), link)
+        },
+        "tailPocket.path" to { a -> toValue(TailPocketPath.serializer(), connection(a).first.path(a.long("timeoutMs") ?: 5_000)) },
+        "tailPocket.link" to { a -> toValue(TailPocketHostLink.serializer(), connection(a).first.currentLink()) },
         "tailPocket.nearby.start" to { a ->
             val service = a.string("service")
             synchronized(this) {
@@ -99,7 +123,7 @@ class TailPocketBridge(
             toValue(TailPocketInvite.serializer(), p.finish(a.long("timeoutMs") ?: 300_000))
         },
         "tailPocket.local.cancel" to { a -> pending.remove(a.long("op") ?: -1)?.cancel(); null },
-        "tailPocket.scan" to { a -> (scanner ?: throw TailPocketException("unsupported"))(a.prefix()) },
+        "tailPocket.scan" to { a -> (scanner ?: throw TailPocketException("unsupported"))(a.scanPrefixes()) },
         "tailPocket.store.phoneKey" to { _ -> store.phoneKey() },
         "tailPocket.store.saveLink" to { a ->
             store.saveLink(fromValue(TailPocketHostLink.serializer(), a["link"] as? Map<*, *> ?: throw TailPocketException("invalid-arguments")), a.optString("slot") ?: "default")
@@ -120,21 +144,24 @@ class TailPocketBridge(
     /** Stops discovery and closes every connection. */
     fun close() {
         synchronized(this) { nearby?.stop(); nearby = null }
-        connections.values.forEach { it.close() }
+        connections.values.forEach { it.first.close() }
         connections.clear()
         pending.values.forEach { it.cancel() }
         pending.clear()
     }
 
+    private fun connection(a: Map<String, Any?>) = connections[a.long("handle") ?: -1] ?: throw TailPocketException("unknown-handle")
+
     companion object {
         val NAMES = listOf(
-            "tailPocket.newKey", "tailPocket.publicKey", "tailPocket.inviteText", "tailPocket.decodeInvite", "tailPocket.pair", "tailPocket.connect", "tailPocket.disconnect",
+            "tailPocket.newKey", "tailPocket.publicKey", "tailPocket.inviteText", "tailPocket.decodeInvite", "tailPocket.decodeInvite2",
+            "tailPocket.pair", "tailPocket.connect", "tailPocket.disconnect", "tailPocket.sync", "tailPocket.path", "tailPocket.link",
             "tailPocket.nearby.start", "tailPocket.nearby.stop", "tailPocket.local.begin", "tailPocket.local.finish", "tailPocket.local.cancel", "tailPocket.scan",
             "tailPocket.store.phoneKey", "tailPocket.store.saveLink", "tailPocket.store.link", "tailPocket.store.deleteLink",
         )
 
         /** A bridge with the Keystore store and NsdManager discovery. */
-        fun create(context: Context, scanner: (suspend (String) -> String)? = null, emit: (String, Any?) -> Unit): TailPocketBridge {
+        fun create(context: Context, scanner: (suspend (List<String>) -> String)? = null, emit: (String, Any?) -> Unit): TailPocketBridge {
             val app = context.applicationContext
             return TailPocketBridge(TailPocket.default, TailPocketKeystoreStore(app), { service -> NsdSource(TailPocketNearbyHosts(app, service)) }, scanner, emit)
         }
@@ -157,6 +184,9 @@ private fun Map<String, Any?>.string(key: String) = this[key] as? String ?: thro
 private fun Map<String, Any?>.optString(key: String) = this[key] as? String
 private fun Map<String, Any?>.long(key: String) = (this[key] as? Number)?.toLong()
 private fun Map<String, Any?>.prefix() = optString("prefix") ?: TailPocket.DEFAULT_PREFIX
+/** The prefixes "tailPocket.scan" looks for: `prefix` and `prefix2` as given, or both defaults when neither is. */
+private fun Map<String, Any?>.scanPrefixes() = listOfNotNull(optString("prefix"), optString("prefix2")).filter { it.isNotEmpty() }
+    .ifEmpty { listOf(TailPocket.DEFAULT_PREFIX, TailPocket.DEFAULT_PREFIX2) }
 
 private fun <T> toValue(serializer: KSerializer<T>, value: T): Any? = plain(json.encodeToJsonElement(serializer, value))
 private fun <T> fromValue(serializer: KSerializer<T>, value: Map<*, *>): T =

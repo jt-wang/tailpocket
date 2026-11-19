@@ -6,7 +6,8 @@
   "capabilities": {
     "network": { "hosts": ["127.0.0.1"] },
     "host": [
-      "tailPocket.newKey", "tailPocket.publicKey", "tailPocket.inviteText", "tailPocket.decodeInvite", "tailPocket.pair", "tailPocket.connect", "tailPocket.disconnect",
+      "tailPocket.newKey", "tailPocket.publicKey", "tailPocket.inviteText", "tailPocket.decodeInvite", "tailPocket.decodeInvite2", "tailPocket.pair", "tailPocket.connect", "tailPocket.disconnect",
+      "tailPocket.sync", "tailPocket.path", "tailPocket.link",
       "tailPocket.nearby.start", "tailPocket.nearby.stop", "tailPocket.local.begin", "tailPocket.local.finish", "tailPocket.local.cancel", "tailPocket.scan",
       "tailPocket.store.phoneKey", "tailPocket.store.saveLink", "tailPocket.store.link", "tailPocket.store.deleteLink"
     ]

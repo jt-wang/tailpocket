@@ -23,6 +23,17 @@ class BridgeTest {
         override fun localPairStart(op: Long, address: String, label: String, device: String) = """{"code":"123456"}"""
         override fun localPairFinish(op: Long, timeoutMs: Long) = """{"v":1,"address":"tcB","port":48932,"key":"privkey:k","proof":"p","expiresAt":9}"""
         override fun cancel(op: Long) {}
+
+        override fun decodeInvite2(text: String, prefix: String) = if (text.startsWith(prefix) || text.startsWith("tailpocket1:"))
+            """{"v":2,"name":"Mac","exp":9,"via":[{"t":"relay","u":"wss://relay.example.com","r":"AAAAAAAAAAAAAAAAAAAAAA","m":"opaque"}]}""" else """{"error":"invalid-invite"}"""
+        var paired2 = ""
+        override fun pair2(op: Long, invite: String, key: String, device: String, derp: String, timeoutMs: Long): String {
+            paired2 = invite
+            return """{"name":"Mac","payload":"t","key":"$key","pk":"PK","via":[{"t":"relay","u":"wss://relay.example.com","r":"R"}]}"""
+        }
+        override fun sync(handle: Long, timeoutMs: Long) = """{"address":"tcM","port":48931,"name":"Mac","key":"privkey:1","pk":"PK","via":[{"t":"relay","u":"wss://relay.example.com","r":"R"}]}"""
+        override fun link(handle: Long) = sync(handle, 0)
+        override fun path(handle: Long, timeoutMs: Long) = if (handle == 4L) """{"route":"relay","relay":"relay.example.com"}""" else """{"error":"revoked"}"""
     }
 
     private class MemoryStore : TailPocketLinkStore {
@@ -44,18 +55,33 @@ class BridgeTest {
     private val store = MemoryStore()
     private val nearby = FakeNearby()
     private val events = mutableListOf<Pair<String, Any?>>()
-    private val bridge = TailPocketBridge(TailPocket.with(native), store, { nearby }, scanner = { "tailpocket1:scanned" }, emit = { n, d -> events += n to d })
+    private val scans = mutableListOf<List<String>>()
+    private val bridge = TailPocketBridge(TailPocket.with(native), store, { nearby }, scanner = { scans += it; "tailpocket1:scanned" }, emit = { n, d -> events += n to d })
 
     private suspend fun call(name: String, args: Map<String, Any?> = emptyMap()) = bridge.call(name, args)
 
     @Test fun pairWithTextUsesTheStoredKeyAndSavesTheLink() = runTest {
         @Suppress("UNCHECKED_CAST")
         val link = call("tailPocket.pair", mapOf("invite" to "tailpocket1:x", "device" to "Pixel", "save" to true)) as Map<String, Any?>
-        assertEquals("tcM", link["address"])
-        assertEquals("privkey:stored", native.pairedWith)
-        assertEquals("tcM", store.links["default"]?.address)
+        assertEquals("PK", link["pk"])
+        assertEquals("privkey:stored", link["key"])
+        assertEquals("PK", store.links["default"]?.hostKey)
         @Suppress("UNCHECKED_CAST")
-        assertEquals("tcM", (call("tailPocket.store.link") as Map<String, Any?>)["address"])
+        assertEquals("PK", (call("tailPocket.store.link") as Map<String, Any?>)["pk"])
+    }
+
+    // A v1 invite object pairs as its one tailcat route; sync on a stored link saves the result to its slot.
+    @Test fun v1ObjectPairsAsTailcatAndSyncSaves() = runTest {
+        call("tailPocket.pair", mapOf("invite" to mapOf("v" to 1, "address" to "tcA", "port" to 48932, "key" to "privkey:x", "proof" to "p", "expiresAt" to 9, "name" to "Mac"), "device" to "Pixel"))
+        assertEquals(true, native.paired2.contains("\"t\":\"tailcat\""))
+        store.links["default"] = TailPocketHostLink("tcM", 48931, "Mac", null, "privkey:1")
+        @Suppress("UNCHECKED_CAST")
+        val c = call("tailPocket.connect") as Map<String, Any?>
+        call("tailPocket.sync", mapOf("handle" to c["handle"]))
+        assertEquals("PK", store.links["default"]?.hostKey)
+        @Suppress("UNCHECKED_CAST")
+        assertEquals("relay", (call("tailPocket.path", mapOf("handle" to c["handle"])) as Map<String, Any?>)["route"])
+        try { call("tailPocket.sync", mapOf("handle" to 99)); fail() } catch (e: TailPocketException) { assertEquals("unknown-handle", e.code) }
     }
 
     @Test fun connectAndDisconnect() = runTest {
@@ -78,6 +104,16 @@ class BridgeTest {
         assertEquals("tcB", invite["address"])
         call("tailPocket.nearby.stop")
         assertNull(nearby.onChange)
+    }
+
+    // A v0.3 phone scans v1 and v2 invites: both defaults, or the app's two prefixes; one prefix alone stays one.
+    @Test fun scanLooksForBothPrefixes() = runTest {
+        call("tailPocket.scan")
+        call("tailPocket.scan", mapOf("prefix" to "herdr1:", "prefix2" to "herdr2:"))
+        call("tailPocket.scan", mapOf("prefix" to "herdr1:"))
+        assertEquals(listOf(listOf("tailpocket1:", "tailpocket2:"), listOf("herdr1:", "herdr2:"), listOf("herdr1:")), scans)
+        assertEquals("herdr2:abc", TailPocket.inviteText("see herdr2:abc", listOf("herdr1:", "herdr2:")))
+        assertNull(TailPocket.inviteText("tailpocket2:abc", listOf("herdr1:", "herdr2:")))
     }
 
     @Test fun scanAndErrors() = runTest {

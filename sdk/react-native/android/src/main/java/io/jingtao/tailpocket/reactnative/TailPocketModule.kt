@@ -26,7 +26,7 @@ class TailPocketModule(private val context: ReactApplicationContext) : ReactCont
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val bridge = TailPocketBridge.create(
         context,
-        scanner = { prefix -> TailPocketQrScanActivity.scan(context.currentActivity ?: context, prefix) },
+        scanner = { prefixes -> TailPocketQrScanActivity.scan(context.currentActivity ?: context, prefixes) },
         emit = { event, data ->
             context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java).emit(event, toJs(data))
         },

@@ -2,6 +2,7 @@
 //
 //   node examples/node-host/server.mjs            # prints a pairing code; scan it with the phone
 //   TAILPOCKET_SERVICE=_myapp._tcp node …                 # also lets phones on this Wi-Fi find it
+//   TAILPOCKET_RELAY_URL=wss://relay.example.com TAILPOCKET_RELAY_TOKEN=… node …   # also over your tailpocket-relay
 //
 // TailPocketHostState (identity + paired phones) is kept in ./host-state.json; delete it to forget all phones.
 import { createServer } from 'node:http';
@@ -25,11 +26,14 @@ const connectHost = await TailPocketHost.start({
   forward: `127.0.0.1:${web.address().port}`,
   identity: state.identity,
   allowed: state.allowed,
+  keys: state.keys,
+  relays: process.env.TAILPOCKET_RELAY_URL ? [{ url: process.env.TAILPOCKET_RELAY_URL, token: process.env.TAILPOCKET_RELAY_TOKEN ?? '' }] : undefined,
   save: (next) => writeFileSync(stateFile, JSON.stringify(next), { mode: 0o600 }),
 });
 
 const pairing = await connectHost.pair({ ttl: 300, payload: 'welcome' });
 console.log(`QR ${pairing.qr}`); // render it with any QR library, or paste it into the phone
+console.log(`QR2 ${pairing.qr2}`); // the v2 code: every route, for v0.3 phones
 if (process.env.TAILPOCKET_SERVICE) {
   const ask = createInterface({ input: process.stdin, output: process.stderr });
   pairing.local({

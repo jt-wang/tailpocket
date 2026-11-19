@@ -42,13 +42,17 @@ var ErrInvalid = errors.New("invalid invite")
 
 // Encode returns prefix followed by the base64url (no padding) zlib-compressed JSON form.
 func Encode(in Invite, prefix string) (string, error) {
-	if !validPrefix(prefix) {
-		return "", errors.New("invalid prefix")
-	}
 	if err := in.Validate(); err != nil {
 		return "", err
 	}
-	body, err := json.Marshal(in)
+	return pack(in, prefix)
+}
+
+func pack(v any, prefix string) (string, error) {
+	if !validPrefix(prefix) {
+		return "", errors.New("invalid prefix")
+	}
+	body, err := json.Marshal(v)
 	if err != nil {
 		return "", err
 	}
@@ -72,23 +76,31 @@ func Encode(in Invite, prefix string) (string, error) {
 
 // Decode parses the text Encode produced. Surrounding whitespace is ignored.
 func Decode(text, prefix string) (Invite, error) {
+	body, err := unpack(text, prefix)
+	if err != nil {
+		return Invite{}, err
+	}
+	return ParseJSON(body)
+}
+
+func unpack(text, prefix string) ([]byte, error) {
 	text = strings.TrimSpace(text)
 	if !validPrefix(prefix) || len(text) > MaxTextLength || !strings.HasPrefix(text, prefix) {
-		return Invite{}, ErrInvalid
+		return nil, ErrInvalid
 	}
 	packed, err := base64.RawURLEncoding.DecodeString(text[len(prefix):])
 	if err != nil || len(packed) == 0 {
-		return Invite{}, ErrInvalid
+		return nil, ErrInvalid
 	}
 	r, err := zlib.NewReader(bytes.NewReader(packed))
 	if err != nil {
-		return Invite{}, ErrInvalid
+		return nil, ErrInvalid
 	}
 	body, err := io.ReadAll(io.LimitReader(r, MaxTextLength+1))
 	if err != nil || len(body) > MaxTextLength {
-		return Invite{}, ErrInvalid
+		return nil, ErrInvalid
 	}
-	return ParseJSON(body)
+	return body, nil
 }
 
 // ParseJSON parses and validates the plain JSON form (what same-Wi-Fi pairing delivers sealed).

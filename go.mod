@@ -2,13 +2,16 @@ module github.com/jt-wang/tailpocket
 
 go 1.27.1
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
+	github.com/coder/websocket v1.8.15
+	github.com/flynn/noise v1.1.0
 	github.com/tailscale/tailcat v0.6.0
-	golang.org/x/crypto v0.58.0
-	golang.org/x/net v0.61.0
-	golang.org/x/sys v0.49.0
+	golang.org/x/crypto v0.59.0
+	golang.org/x/mobile v0.0.0-20261011034528-197770444867
+	golang.org/x/net v0.62.0
+	golang.org/x/sys v0.50.0
 	tailscale.com v1.103.0-pre.0.20260904030409-31d8badb3bfb
 )
 
@@ -16,7 +19,6 @@ require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/akutz/memconn v0.1.0 // indirect
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be // indirect
-	github.com/coder/websocket v1.8.14 // indirect
 	github.com/creachadair/msync v0.8.1 // indirect
 	github.com/creack/pty v1.1.24 // indirect
 	github.com/dblohm7/wingoes v0.0.0-20240119213807-a09d6be7affa // indirect
@@ -29,7 +31,7 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/hdevalence/ed25519consensus v0.2.0 // indirect
 	github.com/jsimonetti/rtnetlink v1.4.1 // indirect
-	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/kr/fs v0.1.0 // indirect
 	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
@@ -49,11 +51,10 @@ require (
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
-	golang.org/x/mobile v0.0.0-20261011034528-197770444867
 	golang.org/x/mod v0.42.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/term v0.47.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/term v0.48.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.52.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect

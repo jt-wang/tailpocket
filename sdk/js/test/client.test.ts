@@ -99,10 +99,22 @@ test("the names it calls are the bridge's names", async () => {
   const t: TailPocketTransport = { async call(n) { names.add(n); return n === "tailPocket.local.begin" ? { op: 1, code: "1" } : n === "tailPocket.connect" ? { handle: 1, port: 1, baseUrl: "" } : null; }, on: () => () => {} };
   const tailPocket = createTailPocket(t);
   await tailPocket.newKey(); await tailPocket.publicKey("k"); await tailPocket.inviteText("t"); await tailPocket.decodeInvite("t"); await tailPocket.pair("t", { device: "d" });
-  await (await tailPocket.connect()).close(); await (await tailPocket.nearby("s", () => {}))(); const p = await tailPocket.pairNearby({ name: "n" }); await p.finish(); await p.cancel();
+  await tailPocket.decodeInvite2("t");
+  const conn = await tailPocket.connect(); await conn.sync(); await conn.path(); await conn.link(); await conn.close();
+  await (await tailPocket.nearby("s", () => {}))(); const p = await tailPocket.pairNearby({ name: "n" }); await p.finish(); await p.cancel();
   await tailPocket.scan(); await tailPocket.store.phoneKey(); await tailPocket.store.saveLink(link); await tailPocket.store.link(); await tailPocket.store.deleteLink();
   const { readFileSync } = await import("node:fs");
   const kotlin = readFileSync(new URL("../../android/tailpocket/src/main/java/io/jingtao/tailpocket/Bridge.kt", import.meta.url), "utf8");
-  const bridge = [...kotlin.matchAll(/"(tailPocket\.[a-zA-Z.]+)"/g)].map((m) => m[1]).filter((n) => n !== "tailPocket.nearby");
+  const bridge = [...kotlin.matchAll(/"(tailPocket\.[a-zA-Z0-9.]+)"/g)].map((m) => m[1]).filter((n) => n !== "tailPocket.nearby");
   assert.deepEqual([...names].sort(), [...new Set(bridge)].sort());
+});
+
+test("a connection syncs, reports its path and link by handle", async () => {
+  const f = fake({ "tailPocket.connect": { handle: 7, port: 1, baseUrl: "" }, "tailPocket.sync": { name: "Mac", key: "k", pk: "PK" },
+    "tailPocket.path": { route: "relay", relay: "relay.example.com" }, "tailPocket.link": { name: "Mac", key: "k" } });
+  const c = await createTailPocket(f.transport).connect();
+  assert.equal((await c.sync()).pk, "PK");
+  assert.equal((await c.path(2000)).route, "relay");
+  await c.link();
+  assert.deepEqual(f.calls.slice(1).map((x) => [x.name, x.args]), [["tailPocket.sync", { handle: 7 }], ["tailPocket.path", { handle: 7, timeoutMs: 2000 }], ["tailPocket.link", { handle: 7 }]]);
 });

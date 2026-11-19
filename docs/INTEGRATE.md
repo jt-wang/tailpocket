@@ -15,7 +15,6 @@ nothing to clone, no Go or gomobile. To build them yourself, see [BUILD.md](BUIL
 | Computer, any language | the helper `$R/tailpocket-host-<os>-<arch>` (`darwin-arm64`, `darwin-amd64`, `linux-amd64`, `linux-arm64`, `windows-amd64.exe`) |
 | Phone, Swift | Swift package `https://github.com/jt-wang/tailpocket`, from `0.2.0` |
 | Phone, Kotlin | unzip `$R/tailpocket-android-m2.zip` into your project and add its `m2` folder as a Maven repository |
-| Phone, browser | `npm install $R/tailpocket-web.tgz` |
 | Phone, React Native | `npm install $R/react-native-tailpocket.tgz` |
 | Phone, NSH | `npm install $R/tailpocket-client.tgz`, and the native adapter from the Swift or Kotlin row |
 | Test phone (command line) | `$R/tailpocket-phone-<os>-<arch>` |
@@ -68,12 +67,6 @@ Set `android:networkSecurityConfig="@xml/tailpocket_network_security_config"` on
 `<application>` (or add its `127.0.0.1` domain-config to your own config): Android refuses plain
 HTTP to `TailPocketConnection.baseUrl` otherwise. Use `TailPocketKeystoreStore`. Check: `./gradlew test`, and
 `scripts/e2e-android.sh` as a model for an instrumented test against a real host.
-
-**Browser / PWA:** depend on `tailpocket-web` and serve it with its `dist/` folder; `loadTailPocket()`, then `decodeInvite`, `pair`, `fetch`.
-Browsers cannot browse Bonjour, so pairing is by QR code or pasted text; all traffic goes through
-the relays. The link holds the phone key, so store it where your app keeps secrets.
-
-To check the web phone, run `TAILPOCKET_LIVE=1 npm test` in `sdk/web`.
 
 **NSH:** in the native app, `TailPocketNsh.attach(view)` (iOS: copy `sdk/apple/NSH/Sources` into your app next
 to its NativeShell.xcframework, with the Swift package above; Android: copy `sdk/android/tailpocket-nsh` as a module

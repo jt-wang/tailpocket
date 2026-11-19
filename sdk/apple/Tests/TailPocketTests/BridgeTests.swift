@@ -19,19 +19,26 @@ final class BridgeTests: XCTestCase {
         func address(of name: String) async throws -> String { throw TailPocketError(code: "local-failed") }
     }
 
+    final class Scans: @unchecked Sendable {
+        let lock = NSLock()
+        var asked: [[String]] = []
+        func add(_ p: [String]) { lock.lock(); asked.append(p); lock.unlock() }
+    }
+
     final class Events: @unchecked Sendable {
         let lock = NSLock()
         var items: [(String, Any?)] = []
         func add(_ name: String, _ data: Any?) { lock.lock(); items.append((name, data)); lock.unlock() }
     }
 
-    func makeBridge(store: MemoryStore = MemoryStore(), nearby: FakeNearby = FakeNearby(), events: Events = Events()) -> TailPocketBridge {
-        TailPocketBridge(store: store, nearby: { _ in nearby }, scanner: { _ in "tailpocket1:scanned" }, emit: { events.add($0, $1) })
+    func makeBridge(store: MemoryStore = MemoryStore(), nearby: FakeNearby = FakeNearby(), events: Events = Events(),
+                    scans: Scans = Scans()) -> TailPocketBridge {
+        TailPocketBridge(store: store, nearby: { _ in nearby }, scanner: { scans.add($0); return "tailpocket1:scanned" }, emit: { events.add($0, $1) })
     }
 
     func testNamesMatchTheContract() {
         XCTAssertEqual(Set(makeBridge().functions.keys), Set(TailPocketBridge.names))
-        XCTAssertEqual(TailPocketBridge.names.count, 17)
+        XCTAssertEqual(TailPocketBridge.names.count, 21)
     }
 
     func testKeysInviteTextAndErrors() async throws {
@@ -45,6 +52,18 @@ final class BridgeTests: XCTestCase {
         do { _ = try await bridge.call("tailPocket.decodeInvite", ["text": "junk"]); XCTFail() } catch { XCTAssertEqual((error as? TailPocketError)?.code, "invalid-invite") }
         do { _ = try await bridge.call("tailPocket.nope", nil); XCTFail() } catch { XCTAssertEqual((error as? TailPocketError)?.code, "unknown-function") }
         do { _ = try await bridge.call("tailPocket.pair", [:]); XCTFail() } catch { XCTAssertEqual((error as? TailPocketError)?.code, "invalid-arguments") }
+    }
+
+    // A v0.3 phone scans v1 and v2 invites: both defaults, or the app's two prefixes; one prefix alone stays one.
+    func testScanLooksForBothPrefixes() async throws {
+        let scans = Scans()
+        let bridge = makeBridge(scans: scans)
+        _ = try await bridge.call("tailPocket.scan", nil)
+        _ = try await bridge.call("tailPocket.scan", ["prefix": "herdr1:", "prefix2": "herdr2:"])
+        _ = try await bridge.call("tailPocket.scan", ["prefix": "herdr1:"])
+        XCTAssertEqual(scans.asked, [["tailpocket1:", "tailpocket2:"], ["herdr1:", "herdr2:"], ["herdr1:"]])
+        XCTAssertEqual(TailPocket.inviteText(in: "see herdr2:abc", prefixes: ["herdr1:", "herdr2:"]), "herdr2:abc")
+        XCTAssertNil(TailPocket.inviteText(in: "tailpocket2:abc", prefixes: ["herdr1:", "herdr2:"]))
     }
 
     func testStoreScanAndNearbyEvents() async throws {

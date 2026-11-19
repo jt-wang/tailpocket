@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	protocolVersion = 1
-	lineLimit       = 1 << 20
-	saveTimeout     = 10 * time.Second
+	protocolVersion  = 1
+	lineLimit        = 1 << 20
+	saveTimeout      = 10 * time.Second
+	authorizeTimeout = 5 * time.Second // an unanswered authorize denies
 )
 
 type config struct {
@@ -33,21 +34,35 @@ type config struct {
 	PairingPort   uint16   `json:"pairingPort"`
 	DERPMapURL    string   `json:"derpMapUrl"`
 	IdentifyPhone bool     `json:"identifyPhone"`
+	// v0.3: end-to-end encrypted routes, and the app's own authorization and audit.
+	Keys      map[string]string `json:"keys"`
+	Relays    []relay           `json:"relays"`
+	Listen    []string          `json:"listen"`
+	Authorize bool              `json:"authorize"`
+	Audit     bool              `json:"audit"`
+}
+
+type relay struct {
+	URL    string `json:"url"`
+	Token  string `json:"token"`
+	Opaque bool   `json:"opaque"`
 }
 
 type command struct {
-	Cmd      string   `json:"cmd"`
-	ID       string   `json:"id"`
-	TTL      int      `json:"ttl"`
-	Payload  string   `json:"payload"`
-	QRPrefix string   `json:"qrPrefix"`
-	Service  string   `json:"service"`
-	Label    string   `json:"label"`
-	Instance string   `json:"instance"`
-	Approve  bool     `json:"approve"`
-	OK       bool     `json:"ok"`
-	Allowed  []string `json:"allowed"`
-	Phone    string   `json:"phone"`
+	Cmd      string `json:"cmd"`
+	ID       string `json:"id"`
+	TTL      int    `json:"ttl"`
+	Payload  string `json:"payload"`
+	QRPrefix string `json:"qrPrefix"`
+	// QRPrefix2 is the v2 invite's prefix; default tailpocket2:.
+	QRPrefix2 string   `json:"qrPrefix2"`
+	Service   string   `json:"service"`
+	Label     string   `json:"label"`
+	Instance  string   `json:"instance"`
+	Approve   bool     `json:"approve"`
+	OK        bool     `json:"ok"`
+	Allowed   []string `json:"allowed"`
+	Phone     string   `json:"phone"`
 }
 
 type runtime struct {
@@ -58,7 +73,7 @@ type runtime struct {
 	out     io.Writer
 
 	mu       sync.Mutex
-	saves    map[string]chan bool
+	saves    map[string]chan bool // save and authorize requests waiting for the app's answer
 	serial   int
 	pairings map[string]*window
 	wg       sync.WaitGroup
@@ -95,8 +110,21 @@ func Run(parent context.Context, in io.Reader, out io.Writer) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	r.ctx = ctx
-	h, err := connecthost.New(connecthost.Config{Name: r.cfg.Name, Port: r.cfg.Port, PairingPort: r.cfg.PairingPort, Identity: r.cfg.Identity,
-		Allowed: r.cfg.Allowed, DERPMapURL: r.cfg.DERPMapURL, Save: r.save})
+	hc := connecthost.Config{Name: r.cfg.Name, Port: r.cfg.Port, PairingPort: r.cfg.PairingPort, Identity: r.cfg.Identity,
+		Allowed: r.cfg.Allowed, Keys: r.cfg.Keys, DERPMapURL: r.cfg.DERPMapURL, Save: r.save, Listen: r.cfg.Listen}
+	for _, rl := range r.cfg.Relays {
+		hc.Relays = append(hc.Relays, connecthost.Relay{URL: rl.URL, Token: rl.Token, Opaque: rl.Opaque})
+	}
+	if r.cfg.Authorize {
+		hc.Authorize = r.authorize
+	}
+	if r.cfg.Audit {
+		hc.Audit = func(e connecthost.Event) {
+			r.emit(map[string]any{"event": "audit", "kind": e.Kind, "phone": e.Phone, "route": e.Route,
+				"reason": e.Reason, "time": e.Time.UnixMilli()})
+		}
+	}
+	h, err := connecthost.New(hc)
 	switch {
 	case errors.Is(err, connecthost.ErrInvalidIdentity):
 		return fail("invalid-identity")
@@ -121,7 +149,7 @@ func Run(parent context.Context, in io.Reader, out io.Writer) error {
 				r.emit(map[string]any{"event": "error", "code": "invalid-command"})
 				continue
 			}
-			if c.Cmd == "saved" { // answered at once: other commands may be waiting on it
+			if c.Cmd == "saved" || c.Cmd == "authorized" { // answered at once: other commands may be waiting on it
 				r.ack(c.ID, c.OK)
 				continue
 			}
@@ -179,11 +207,11 @@ func (r *runtime) emit(v map[string]any) {
 	_, _ = r.out.Write(append(body, '\n'))
 }
 
-// save asks the app to store state and waits for {"cmd":"saved","id":…,"ok":true}.
-func (r *runtime) save(st connecthost.State) error {
+// ask emits event with a new id and waits for the app's answer ({"cmd":"saved"|"authorized","id":…,"ok":…}).
+func (r *runtime) ask(prefix string, event map[string]any, timeout time.Duration) error {
 	r.mu.Lock()
 	r.serial++
-	id := "s" + strconv.Itoa(r.serial)
+	id := prefix + strconv.Itoa(r.serial)
 	ch := make(chan bool, 1)
 	r.saves[id] = ch
 	r.mu.Unlock()
@@ -192,21 +220,32 @@ func (r *runtime) save(st connecthost.State) error {
 		delete(r.saves, id)
 		r.mu.Unlock()
 	}()
-	if st.Allowed == nil {
-		st.Allowed = []string{}
-	}
-	r.emit(map[string]any{"event": "save", "id": id, "state": st})
+	event["id"] = id
+	r.emit(event)
 	select {
 	case ok := <-ch:
 		if !ok {
-			return errors.New("app refused to save")
+			return errors.New("app refused")
 		}
 		return nil
-	case <-time.After(saveTimeout):
-		return errors.New("save-timeout")
+	case <-time.After(timeout):
+		return errors.New("timeout")
 	case <-r.ctx.Done():
 		return r.ctx.Err()
 	}
+}
+
+// save asks the app to store state and waits for {"cmd":"saved","id":…,"ok":true}.
+func (r *runtime) save(st connecthost.State) error {
+	if st.Allowed == nil {
+		st.Allowed = []string{}
+	}
+	return r.ask("s", map[string]any{"event": "save", "state": st}, saveTimeout)
+}
+
+// authorize asks the app about one connection; no answer within authorizeTimeout denies it.
+func (r *runtime) authorize(phone, route string) error {
+	return r.ask("a", map[string]any{"event": "authorize", "phone": phone, "route": route}, authorizeTimeout)
 }
 
 func (r *runtime) ack(id string, ok bool) {
@@ -250,6 +289,18 @@ func (r *runtime) handle(c command) {
 			return
 		}
 		w.p.Close()
+	case "disconnect":
+		r.h.Disconnect(c.Phone)
+		r.emit(map[string]any{"event": "disconnected", "id": c.ID, "phone": c.Phone})
+	case "status":
+		relays := map[string]string{}
+		for u, err := range r.h.RelayStatus() {
+			relays[u] = "up"
+			if err != nil {
+				relays[u] = err.Error()
+			}
+		}
+		r.emit(map[string]any{"event": "status", "id": c.ID, "address": r.h.Address(), "routes": r.h.Routes(), "relays": relays})
 	case "setAllowed", "revoke":
 		r.wg.Add(1)
 		go func() {
@@ -300,8 +351,13 @@ func (r *runtime) pair(c command, fail func(string)) {
 		fail("pair-failed")
 		return
 	}
+	prefix2 := c.QRPrefix2
+	if prefix2 == "" {
+		prefix2 = connectinvite.DefaultPrefix2
+	}
 	qr, err := p.QR(prefix)
-	if err != nil {
+	qr2, err2 := p.QR2(prefix2)
+	if err != nil || err2 != nil {
 		p.Close()
 		fail("invalid-qr-prefix")
 		return
@@ -310,7 +366,8 @@ func (r *runtime) pair(c command, fail func(string)) {
 	r.mu.Lock()
 	r.pairings[c.ID] = w
 	r.mu.Unlock()
-	r.emit(map[string]any{"event": "pairing", "id": c.ID, "qr": qr, "invite": p.Invite(), "expiresAt": p.Expires().Unix()})
+	r.emit(map[string]any{"event": "pairing", "id": c.ID, "qr": qr, "invite": p.Invite(), "qr2": qr2, "invite2": p.InviteV2(),
+		"expiresAt": p.Expires().Unix()})
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()

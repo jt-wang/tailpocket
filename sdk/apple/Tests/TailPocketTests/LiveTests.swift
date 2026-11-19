@@ -7,11 +7,13 @@ import XCTest
 final class LiveTests: XCTestCase {
     var helper: Helper!
     var web: Process!
+    var forwardTarget = ""
 
     override func setUp() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["TAILPOCKET_LIVE"] == "1", "set TAILPOCKET_LIVE=1")
         let port = try startWeb()
-        helper = try Helper(forward: "127.0.0.1:\(port)")
+        forwardTarget = "127.0.0.1:\(port)"
+        helper = try Helper(forward: forwardTarget)
     }
 
     override func tearDown() {
@@ -95,6 +97,87 @@ final class LiveTests: XCTestCase {
         _ = try await bridge.call("tailPocket.disconnect", ["handle": opened?["handle"] as Any])
     }
 
+    /// v0.3 over a local tailpocket-relay (scripts/build-host.sh builds it): pair from the v2 QR over the
+    /// relay only; a phone paired over Tailcat syncs its key and then reaches the computer over the relay
+    /// with no new QR; a revoke reaches the phone, encrypted, as "revoked".
+    func testRelayPairSyncAndRevoke() async throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../../..").standardized
+        #if arch(arm64)
+        let arch = "arm64"
+        #else
+        let arch = "amd64"
+        #endif
+        let relayPort = Int.random(in: 40001...50000)
+        let relay = Process()
+        relay.executableURL = root.appendingPathComponent("build/tailpocket-relay-darwin-\(arch)")
+        relay.arguments = ["--listen", "127.0.0.1:\(relayPort)", "--public-host", "127.0.0.1"]
+        relay.environment = ["TAILPOCKET_RELAY_TOKEN": "relay-token-for-the-swift-test"]
+        relay.standardOutput = FileHandle.nullDevice
+        relay.standardError = FileHandle.nullDevice
+        try relay.run()
+        defer { relay.terminate() }
+        helper.stop()
+        helper = try Helper(forward: forwardTarget, config: ["relays": [["url": "ws://127.0.0.1:\(relayPort)", "token": "relay-token-for-the-swift-test"]]])
+
+        func fetch(_ c: TailPocketConnection) async throws -> String {
+            var lastError: Error = TailPocketError(code: "unreachable")
+            for _ in 0..<6 {
+                do {
+                    var request = URLRequest(url: c.baseURL.appendingPathComponent("hello.txt"))
+                    request.timeoutInterval = 20
+                    let (data, _) = try await URLSession.shared.data(for: request)
+                    return String(decoding: data, as: UTF8.self)
+                } catch { lastError = error; try await Task.sleep(nanoseconds: 500_000_000) }
+            }
+            throw lastError
+        }
+
+        // A new phone pairs from the v2 QR over the relay alone.
+        let invite = try TailPocket.decodeInvite2(try helper.pair(payload: "relay-token", field: "qr2"))
+        let relayOnly = TailPocketInvite2(v: invite.v, name: invite.name, exp: invite.exp, pk: invite.pk, psk: invite.psk,
+                                          via: invite.via.filter { $0.t == "relay" })
+        XCTAssertEqual(relayOnly.via.count, 1)
+        let paired = try await TailPocket.pair(relayOnly, phoneKey: TailPocket.newKey(), device: "swift relay phone")
+        XCTAssertEqual(paired.payload, "relay-token")
+        XCTAssertNotNil(paired.hostKey)
+        let overRelay = TailPocketHostLink(address: "", port: 0, name: paired.name, payload: paired.payload, key: paired.key,
+                                           hostKey: paired.hostKey, via: paired.via)
+        let c1 = try TailPocket.connect(overRelay)
+        let body1 = try await fetch(c1)
+        XCTAssertEqual(body1, "hello from the computer\n")
+        let path1 = try await c1.path()
+        XCTAssertEqual(path1.route, "relay")
+        XCTAssertEqual(path1.relay, "127.0.0.1")
+        c1.close()
+
+        // A phone paired over Tailcat the old way syncs once, then uses the relay.
+        // (A v0.3 computer already returns its key on a v1 pairing; a v0.2 link has neither field.)
+        let fresh = try await TailPocket.pair(try TailPocket.decodeInvite(try helper.pair(payload: "old")), phoneKey: TailPocket.newKey(), device: "swift old phone")
+        let old = TailPocketHostLink(address: fresh.address, port: fresh.port, name: fresh.name, payload: fresh.payload, key: fresh.key)
+        let c2 = try TailPocket.connect(old)
+        var synced: TailPocketHostLink?
+        for _ in 0..<4 where synced == nil { synced = try? await c2.sync() }
+        c2.close()
+        let s = try XCTUnwrap(synced, "sync over Tailcat")
+        XCTAssertNotNil(s.hostKey)
+        XCTAssertEqual(s.via?.first?.t, "relay")
+        let c3 = try TailPocket.connect(TailPocketHostLink(address: "", port: 0, name: s.name, payload: s.payload, key: s.key, hostKey: s.hostKey, via: s.via))
+        let body3 = try await fetch(c3)
+        XCTAssertEqual(body3, "hello from the computer\n")
+
+        // Revoked over the relay: the phone learns it, encrypted.
+        helper.send(["cmd": "revoke", "id": "r1", "phone": TailPocket.publicKey(for: s.key)!])
+        _ = try helper.waitEvent("allowed")
+        _ = try? await fetch(c3)
+        do {
+            _ = try await c3.path()
+            XCTFail("path after revoke")
+        } catch {
+            XCTAssertEqual(error as? TailPocketError, TailPocketError(code: "revoked"))
+        }
+        c3.close()
+    }
+
     func testPairOverSameWiFiWithNWBrowser() async throws {
         let qr = try helper.pair(payload: "")
         _ = qr
@@ -130,7 +213,7 @@ final class Helper: @unchecked Sendable {
     private var events: [[String: Any]] = []
     private var ended = false
 
-    init(forward: String) throws {
+    init(forward: String, config: [String: Any] = [:]) throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../../..").standardized
         #if arch(arm64)
         let arch = "arm64"
@@ -143,7 +226,7 @@ final class Helper: @unchecked Sendable {
         process.standardError = FileHandle.nullDevice
         try process.run()
         Thread { [self] in readLoop() }.start()
-        send(["v": 1, "name": "swift host", "forward": forward])
+        send(["v": 1, "name": "swift host", "forward": forward].merging(config) { _, new in new })
         _ = try waitEvent("ready")
     }
 
@@ -170,11 +253,11 @@ final class Helper: @unchecked Sendable {
         input.fileHandleForWriting.write(data)
     }
 
-    func pair(payload: String) throws -> String {
+    func pair(payload: String, field: String = "qr") throws -> String {
         serial += 1
         lastPairing = "p\(serial)"
         send(["cmd": "pair", "id": lastPairing, "ttl": 180, "payload": payload])
-        return try waitEvent("pairing")["qr"] as! String
+        return try waitEvent("pairing")[field] as! String
     }
 
     /// Waits for the next event of `kind` (earlier events of other kinds are dropped).

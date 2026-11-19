@@ -13,6 +13,7 @@ import (
 	"tailscale.com/types/key"
 
 	"github.com/jt-wang/tailpocket/connectinvite"
+	"github.com/jt-wang/tailpocket/connectsecure"
 )
 
 const (
@@ -27,13 +28,15 @@ const (
 type Phone struct {
 	Key    string // "nodekey:…"
 	Device string // the name the phone gave, cleaned
+	Route  string // the route it pairs over: RouteTailcat, RouteRelay or RouteLAN
 }
 
 type PairOptions struct {
 	// TTL bounds the window (default 2 minutes, at most 15).
 	TTL time.Duration
 	// Payload returns the app's own data for this phone (a token, settings, anything), delivered
-	// with the reply inside the tunnel. It runs once per window. Nil sends no payload.
+	// with the reply inside the tunnel. It runs once per window. Nil sends no payload. An error
+	// refuses the phone: this is where an app checks a pairing, for example the route it came over.
 	Payload func(Phone) (string, error)
 }
 
@@ -47,8 +50,12 @@ type Pairing struct {
 	server  *http.Server
 	ln      *chanListener
 
+	code string // the v2 pairing code; its cid names this window on the encrypted routes
+	cid  string
+
 	mu    sync.Mutex
 	bound string
+	noise *[32]byte // the Noise key the bound phone brought, if any
 	reply *pairReply
 	phone Phone
 
@@ -64,12 +71,16 @@ type pairRequest struct {
 	Device   string `json:"device"`
 }
 
+// pairReply is v1's reply; PK and Via are what v0.3 phones read for the encrypted routes, and older
+// phones skip.
 type pairReply struct {
-	V       int    `json:"v"`
-	Address string `json:"address"`
-	Port    int    `json:"port"`
-	Name    string `json:"name"`
-	Payload string `json:"payload,omitempty"`
+	V       int                   `json:"v"`
+	Address string                `json:"address"`
+	Port    int                   `json:"port"`
+	Name    string                `json:"name"`
+	Payload string                `json:"payload,omitempty"`
+	PK      string                `json:"pk,omitempty"`
+	Via     []connectinvite.Route `json:"via,omitempty"`
 }
 
 // Pair opens a pairing window. Show p.QR(prefix) as a QR code, share it as a link, or call
@@ -93,9 +104,17 @@ func (h *Host) Pair(ctx context.Context, opts PairOptions) (*Pairing, error) {
 	client := key.NewNode()
 	clientText, _ := client.MarshalText()
 	expires := time.Now().Add(ttl)
+	code := connectinvite.NewCode()
 	p := &Pairing{h: h, payload: opts.Payload, expires: expires, ln: newChanListener(),
-		joined: make(chan struct{}), ended: make(chan struct{})}
-	n, err := h.start(ctx, nodeSpec{key: key.NewNode(), psk: tailcat.NewPresharedKey(), region: region,
+		joined: make(chan struct{}), ended: make(chan struct{}), code: code, cid: connectsecure.CIDFor(code)}
+	h.op.Lock()
+	err := h.flushLocked() // the v2 invite carries the host's Noise key: it must be saved first
+	h.op.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	var n node
+	n, err = h.start(ctx, nodeSpec{key: key.NewNode(), psk: tailcat.NewPresharedKey(), region: region,
 		allowed: []key.NodePublic{client.Public()}, port: h.pairingPort, derpMapURL: h.derpMapURL,
 		onTCP: func(port uint16) func(netConn) {
 			if port != h.pairingPort {
@@ -120,8 +139,28 @@ func (h *Host) Pair(ctx context.Context, opts PairOptions) (*Pairing, error) {
 	p.mu.Unlock()
 	h.mu.Lock()
 	h.pairings[p] = struct{}{}
+	h.windows[p.cid] = p
 	h.mu.Unlock()
 	return p, nil
+}
+
+// InviteV2 is the window as a v2 invite: the Tailcat window, every relay and lan route, the host's
+// Noise key and the pairing code. A phone may pair over any of them; they all redeem this window.
+func (p *Pairing) InviteV2() connectinvite.V2 {
+	v1 := p.inv
+	via := []connectinvite.Route{{T: connectinvite.RouteTailcat, Inv: &v1}}
+	h := p.h
+	h.mu.Lock()
+	pk := h.id.noisePublic()
+	via = append(via, h.extraRoutesLocked()...)
+	h.mu.Unlock()
+	return connectinvite.V2{Version: connectinvite.Version2, Name: v1.Name, ExpiresAt: v1.ExpiresAt,
+		PK: encodeKey(pk), PSK: p.code, Via: via}
+}
+
+// QR2 is InviteV2 as text for a QR code or link, e.g. with connectinvite.DefaultPrefix2.
+func (p *Pairing) QR2(prefix string) (string, error) {
+	return connectinvite.EncodeV2(p.InviteV2(), prefix)
 }
 
 // Invite is what the phone needs; holding it lets a phone pair until it expires.
@@ -174,6 +213,7 @@ func (p *Pairing) Close() {
 		}
 		p.h.mu.Lock()
 		delete(p.h.pairings, p)
+		delete(p.h.windows, p.cid)
 		p.h.mu.Unlock()
 		close(p.ended)
 	})
@@ -212,40 +252,60 @@ func (p *Pairing) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	phone := Phone{Key: k.String(), Device: connectinvite.CleanName(req.Device)}
+	// The pairing node admits the invite's one-time key, so phoneKey is only a claim here: no Noise
+	// key is taken with it (pre.2 phones still send one; it is ignored). The phone registers its key
+	// with Sync on the main node, where WireGuard proves the nodekey.
+	reply, status := p.join(r.Context(), k, req.Device, RouteTailcat, nil)
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(reply)
+}
+
+// join pairs phone k through this window, once: the same phone again (a lost reply) gets the same
+// reply. It returns an HTTP status; the encrypted routes map it to a bye.
+func (p *Pairing) join(ctx context.Context, k key.NodePublic, device, route string, noise *[32]byte) (*pairReply, int) {
+	phone := Phone{Key: k.String(), Device: connectinvite.CleanName(device), Route: route}
 	if phone.Device == "" {
 		phone.Device = "Phone"
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.bound != "" && p.bound != phone.Key {
-		w.WriteHeader(http.StatusConflict)
-		return
+	if p.bound != "" && (p.bound != phone.Key || (noise != nil && p.noise != nil && *noise != *p.noise)) {
+		return nil, http.StatusConflict
 	}
 	if p.reply == nil {
 		if !time.Now().Before(p.expires) {
-			w.WriteHeader(http.StatusGone)
-			return
+			return nil, http.StatusGone
 		}
 		payload := ""
 		if p.payload != nil {
+			var err error
 			if payload, err = p.payload(phone); err != nil {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				return
+				return nil, http.StatusServiceUnavailable
 			}
 		}
-		address, err := p.h.addPhone(r.Context(), k)
+		address, err := p.h.addPhone(ctx, k, noise)
 		if err != nil || address == "" {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
+			return nil, http.StatusServiceUnavailable
 		}
-		p.bound, p.phone = phone.Key, phone
-		p.reply = &pairReply{V: 1, Address: address, Port: int(p.h.port), Name: p.h.name, Payload: payload}
+		p.bound, p.phone, p.noise = phone.Key, phone, noise
+		h := p.h
+		p.reply = &pairReply{V: 1, Address: address, Port: int(h.port), Name: h.name, Payload: payload}
+		h.mu.Lock()
+		// The encrypted routes only for a phone whose Noise key the host now holds: a phone that pairs
+		// again keeps its old key (addPhone), and must not be told routes that would call it unpaired.
+		if cur, ok := h.noise[k]; ok && noise != nil && cur == *noise {
+			p.reply.PK, p.reply.Via = encodeKey(h.id.noisePublic()), h.routesLocked()
+		}
+		h.mu.Unlock()
 		p.joinOnce.Do(func() { close(p.joined) })
 		if time.Until(p.expires) > retryGrace {
 			p.timer.Reset(retryGrace)
 		}
+		h.record(Event{Kind: EventPaired, Phone: phone.Key, Route: phone.Route})
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(p.reply)
+	return p.reply, http.StatusOK
 }

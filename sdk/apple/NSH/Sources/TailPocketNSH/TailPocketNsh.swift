@@ -13,10 +13,10 @@ public enum TailPocketNsh {
     public static func attach(_ view: NshAppView,
                               store: any TailPocketLinkStore = TailPocketKeychainStore(),
                               nearby: @escaping @Sendable (String) -> any TailPocketNearbySource = { TailPocketNearbyHostsSource(service: $0) },
-                              scanner: (@Sendable (String) async throws -> String)? = nil) -> TailPocketBridge {
-        let scan: @Sendable (String) async throws -> String = scanner ?? { [weak view] prefix in
+                              scanner: (@Sendable ([String]) async throws -> String)? = nil) -> TailPocketBridge {
+        let scan: @Sendable ([String]) async throws -> String = scanner ?? { [weak view] prefixes in
             guard #available(iOS 16.0, *) else { throw TailPocketError(code: "unsupported") }
-            return try await TailPocketQRScanner.scan(from: view?.window?.rootViewController, prefix: prefix)
+            return try await TailPocketQRScanner.scan(from: view?.window?.rootViewController, prefixes: prefixes)
         }
         let bridge = TailPocketBridge(store: store, nearby: nearby, scanner: scan, emit: { [weak view] event, data in
             Task { @MainActor in view?.send(event, data) }

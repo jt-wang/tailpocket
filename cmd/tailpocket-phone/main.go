@@ -1,13 +1,16 @@
 // tailpocket-phone is a phone client on the command line: pair with a host, then reach it.
 //
-//	tailpocket-phone pair [-device NAME] [-prefix tailpocket1:] [-key FILE] [-out FILE] <invite text | ->
+//	tailpocket-phone pair [-device NAME] [-prefix tailpocket1:] [-prefix2 tailpocket2:] [-key FILE] [-out FILE] <invite text | ->
 //	tailpocket-phone local -service _myapp._tcp [-name HOST] [-device NAME] [-key FILE] [-out FILE]
 //	tailpocket-phone connect -link FILE
 //	tailpocket-phone dial -link FILE
+//	tailpocket-phone sync -link FILE
 //
-// pair and local print the Link JSON (or write it to -out with mode 0600). The phone key is read
-// from -key, or created there if the file does not exist; without -key a new key is used.
-// connect prints "listening 127.0.0.1:PORT" and forwards until interrupted; dial pipes stdin/stdout.
+// pair and local print the Link JSON (or write it to -out with mode 0600). pair takes a v1 or a v2
+// invite. The phone key is read from -key, or created there if the file does not exist; without -key
+// a new key is used. connect prints "listening 127.0.0.1:PORT" and forwards until interrupted; dial
+// pipes stdin/stdout. Both write the link file back when the host sends new routes. sync registers
+// the phone's end-to-end key over Tailcat (a link from before v0.3) and writes the link file back.
 package main
 
 import (
@@ -30,10 +33,11 @@ import (
 func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
 const usage = `usage:
-  tailpocket-phone pair [-device NAME] [-prefix tailpocket1:] [-key FILE] [-out FILE] <invite text | ->
+  tailpocket-phone pair [-device NAME] [-prefix tailpocket1:] [-prefix2 tailpocket2:] [-key FILE] [-out FILE] <invite text | ->
   tailpocket-phone local -service _myapp._tcp [-name HOST] [-label L] [-device NAME] [-key FILE] [-out FILE]
   tailpocket-phone connect -link FILE
   tailpocket-phone dial -link FILE
+  tailpocket-phone sync -link FILE
 `
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -47,6 +51,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.SetOutput(io.Discard)
 	device := fs.String("device", hostnameOr("Phone"), "name the host shows")
 	prefix := fs.String("prefix", connectinvite.DefaultPrefix, "invite text prefix")
+	prefix2 := fs.String("prefix2", connectinvite.DefaultPrefix2, "v2 invite text prefix")
 	keyFile := fs.String("key", "", "phone key file")
 	outFile := fs.String("out", "", "write the link here")
 	service := fs.String("service", "", "Bonjour type")
@@ -71,11 +76,21 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			b, _ := io.ReadAll(io.LimitReader(stdin, connectinvite.MaxTextLength+1))
 			text = string(b)
 		}
+		text = strings.TrimSpace(text)
+		if strings.HasPrefix(text, *prefix2) {
+			inv, err := connectinvite.DecodeV2(text, *prefix2)
+			if err != nil {
+				return fail(err)
+			}
+			return finish(ctx, func(ctx context.Context, key string) (connectphone.Link, error) {
+				return connectphone.PairV2(ctx, inv, key, opts)
+			}, *keyFile, *outFile, stdout, stderr)
+		}
 		inv, err := connectinvite.Decode(text, *prefix)
 		if err != nil {
 			return fail(err)
 		}
-		return finish(ctx, inv, *keyFile, *outFile, opts, stdout, stderr)
+		return finishV1(ctx, inv, *keyFile, *outFile, opts, stdout, stderr)
 	case "local":
 		if *service == "" {
 			return bad("local needs -service")
@@ -102,8 +117,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(err)
 		}
-		return finish(ctx, inv, *keyFile, *outFile, opts, stdout, stderr)
-	case "connect", "dial":
+		return finishV1(ctx, inv, *keyFile, *outFile, opts, stdout, stderr)
+	case "connect", "dial", "sync":
 		if *linkFile == "" {
 			return bad(args[0] + " needs -link")
 		}
@@ -115,11 +130,26 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(err)
 		}
+		path := *linkFile
+		opts.OnLink = func(l connectphone.Link) { _ = writeLink(path, l) }
 		s, err := connectphone.Connect(link, opts)
 		if err != nil {
 			return fail(err)
 		}
 		defer s.Close()
+		if args[0] == "sync" {
+			sctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			defer cancel()
+			l, err := s.Sync(sctx)
+			if err != nil {
+				return fail(err)
+			}
+			if err := writeLink(path, l); err != nil {
+				return fail(err)
+			}
+			fmt.Fprintf(stderr, "synced with %q: %d routes besides Tailcat\n", l.Name, len(l.Via))
+			return 0
+		}
 		if args[0] == "dial" {
 			dctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			c, err := s.Dial(dctx)
@@ -144,7 +174,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return bad("unknown command " + args[0])
 }
 
-func finish(ctx context.Context, inv connectinvite.Invite, keyFile, outFile string, opts connectphone.Options, stdout, stderr io.Writer) int {
+func finishV1(ctx context.Context, inv connectinvite.Invite, keyFile, outFile string, opts connectphone.Options, stdout, stderr io.Writer) int {
+	return finish(ctx, func(ctx context.Context, key string) (connectphone.Link, error) {
+		return connectphone.Pair(ctx, inv, key, opts)
+	}, keyFile, outFile, stdout, stderr)
+}
+
+func finish(ctx context.Context, pair func(context.Context, string) (connectphone.Link, error), keyFile, outFile string, stdout, stderr io.Writer) int {
 	key, err := loadKey(keyFile)
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
@@ -152,14 +188,14 @@ func finish(ctx context.Context, inv connectinvite.Invite, keyFile, outFile stri
 	}
 	pctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	link, err := connectphone.Pair(pctx, inv, key, opts)
+	link, err := pair(pctx, key)
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return 1
 	}
 	text, _ := link.Encode()
 	if outFile != "" {
-		if err := os.WriteFile(outFile, []byte(text+"\n"), 0o600); err != nil {
+		if err := writeLink(outFile, link); err != nil {
 			fmt.Fprintln(stderr, "error:", err)
 			return 1
 		}
@@ -168,6 +204,19 @@ func finish(ctx context.Context, inv connectinvite.Invite, keyFile, outFile stri
 	}
 	fmt.Fprintln(stdout, text)
 	return 0
+}
+
+// writeLink replaces the link file atomically, mode 0600.
+func writeLink(path string, l connectphone.Link) error {
+	text, err := l.Encode()
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(text+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func loadKey(path string) (string, error) {

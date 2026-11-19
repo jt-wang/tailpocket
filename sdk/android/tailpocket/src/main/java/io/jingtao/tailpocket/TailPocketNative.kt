@@ -13,6 +13,12 @@ interface TailPocketNative {
     fun localPairStart(op: Long, address: String, label: String, device: String): String
     fun localPairFinish(op: Long, timeoutMs: Long): String
     fun cancel(op: Long)
+    // v0.3
+    fun decodeInvite2(text: String, prefix: String): String
+    fun pair2(op: Long, invite: String, key: String, device: String, derp: String, timeoutMs: Long): String
+    fun sync(handle: Long, timeoutMs: Long): String
+    fun link(handle: Long): String
+    fun path(handle: Long, timeoutMs: Long): String
 }
 
 internal object GoNative : TailPocketNative {
@@ -26,4 +32,10 @@ internal object GoNative : TailPocketNative {
     override fun localPairStart(op: Long, address: String, label: String, device: String): String = Connectmobile.localPairStart(op, address, label, device)
     override fun localPairFinish(op: Long, timeoutMs: Long): String = Connectmobile.localPairFinish(op, timeoutMs)
     override fun cancel(op: Long) = Connectmobile.cancel(op)
+    override fun decodeInvite2(text: String, prefix: String): String = Connectmobile.decodeInvite2(text, prefix)
+    override fun pair2(op: Long, invite: String, key: String, device: String, derp: String, timeoutMs: Long): String =
+        Connectmobile.pair2(op, invite, key, device, derp, timeoutMs)
+    override fun sync(handle: Long, timeoutMs: Long): String = Connectmobile.sync(handle, timeoutMs)
+    override fun link(handle: Long): String = Connectmobile.link(handle)
+    override fun path(handle: Long, timeoutMs: Long): String = Connectmobile.path(handle, timeoutMs)
 }

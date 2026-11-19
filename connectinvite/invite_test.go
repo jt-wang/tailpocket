@@ -188,3 +188,21 @@ func TestNewProofShape(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Only a relay may be opaque: a lan or Tailcat route marked opaque would have the phone send the
+// app's bytes unencrypted.
+func TestOnlyRelaysAreOpaque(t *testing.T) {
+	relay := Route{T: RouteRelay, U: "wss://relay.example.com", R: "AAAAAAAAAAAAAAAAAAAAAA", M: ModeOpaque}
+	if err := ValidateRoutes([]Route{relay}); err != nil {
+		t.Fatalf("opaque relay: %v", err)
+	}
+	for _, r := range []Route{
+		{T: RouteLAN, A: []string{"192.0.2.1:7681"}, M: ModeOpaque},
+		{T: RouteTailcat, A: []string{"tcX"}, P: 48931, M: ModeOpaque},
+		{T: RouteRelay, U: "wss://relay.example.com", R: "AAAAAAAAAAAAAAAAAAAAAA", M: "plain"},
+	} {
+		if ValidateRoutes([]Route{r}) == nil {
+			t.Errorf("accepted %+v", r)
+		}
+	}
+}

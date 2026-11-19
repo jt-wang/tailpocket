@@ -25,6 +25,31 @@ final class SimulatorLiveTests: XCTestCase {
         XCTAssertEqual(body, "hello from the computer\n")
     }
 
+    /// v0.3 inside the simulator: pair from the v2 QR over a local tailpocket-relay alone, then fetch
+    /// with no Tailcat address in the link. scripts/e2e-apple.sh passes TEST_RUNNER_TAILPOCKET_RELAY_INVITE.
+    func testPairAndFetchOverTheRelayFromTheSimulator() async throws {
+        let qr = try XCTUnwrap(ProcessInfo.processInfo.environment["TAILPOCKET_RELAY_INVITE"], "run through scripts/e2e-apple.sh")
+        let invite = try TailPocket.decodeInvite2(qr)
+        let relayOnly = TailPocketInvite2(v: invite.v, name: invite.name, exp: invite.exp, pk: invite.pk, psk: invite.psk,
+                                          via: invite.via.filter { $0.t == "relay" })
+        XCTAssertEqual(relayOnly.via.count, 1)
+        let paired = try await TailPocket.pair(relayOnly, phoneKey: TailPocket.newKey(), device: "iOS relay")
+        XCTAssertEqual(paired.payload, "welcome")
+        let link = TailPocketHostLink(address: "", port: 0, name: paired.name, payload: paired.payload, key: paired.key,
+                                      hostKey: paired.hostKey, via: paired.via)
+        let connection = try TailPocket.connect(link)
+        defer { connection.close() }
+        var body = ""
+        for _ in 0..<6 where body.isEmpty {
+            var request = URLRequest(url: connection.baseURL.appendingPathComponent("hello.txt"))
+            request.timeoutInterval = 20
+            if let (data, _) = try? await URLSession.shared.data(for: request) { body = String(decoding: data, as: UTF8.self) }
+        }
+        XCTAssertEqual(body, "hello from the computer\n")
+        let path = try await connection.path()
+        XCTAssertEqual(path.route, "relay")
+    }
+
     /// The function table NSH and React Native forward to, inside the simulator.
     func testBridgeInTheSimulator() async throws {
         let qr = try XCTUnwrap(ProcessInfo.processInfo.environment["TAILPOCKET_BRIDGE_INVITE"], "run through scripts/e2e-apple.sh")

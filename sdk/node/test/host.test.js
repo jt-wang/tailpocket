@@ -80,3 +80,27 @@ test('pair rejects after close', async () => {
   await host.close();
   await assert.rejects(host.pair(), /closed/);
 });
+
+test('v0.3: relays, the v2 QR, authorize, audit, status and disconnect', async () => {
+  const phone = 'nodekey:' + 'cd'.repeat(32);
+  const asked = [];
+  let audited;
+  const got = new Promise((resolve) => { audited = resolve; });
+  const { host } = await start({
+    allowed: [phone], relays: [{ url: 'wss://relay.example.com', token: 't' }],
+    authorize: (p, route) => { asked.push([p, route]); return false; },
+    audit: (e) => audited(e),
+  });
+  const e = await got;
+  assert.deepEqual(asked, [[phone, 'relay']]);
+  assert.equal(e.kind, 'denied');
+  assert.ok(e.time instanceof Date);
+  const pairing = await host.pair({ payload: 'wait' });
+  assert.equal(pairing.qr2, 'tailpocket2:FAKE');
+  assert.equal(pairing.invite2.v, 2);
+  const st = await host.status();
+  assert.equal(st.relays['wss://relay.example.com'], 'up');
+  assert.equal(st.routes[0].t, 'relay');
+  await host.disconnect(phone);
+  await host.close();
+});

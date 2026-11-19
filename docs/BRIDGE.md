@@ -6,7 +6,8 @@ register these names as they are; `sdk/js/client.ts` gives them types. Another J
 (a WebView, Capacitor, …) needs only a few lines to forward `call(name, args)` and one event.
 
 Failures reject with a code: `invalid-arguments`, `invalid-invite`, `invalid-key`, `invalid-link`,
-`expired`, `unreachable`, `denied`, `local-failed`, `not-paired`, `unsupported`, `cancelled`,
+`expired`, `unreachable`, `revoked` (the computer removed this phone: delete its link), `mismatch`,
+`handshake-closed`, `unknown-handle`, `denied`, `local-failed`, `not-paired`, `unsupported`, `cancelled`,
 `unknown-function`, `unknown-operation`, `nearby-not-started`, `failed`.
 
 | Name | Arguments | Result |
@@ -15,10 +16,14 @@ Failures reject with a code: `invalid-arguments`, `invalid-invite`, `invalid-key
 | `tailPocket.publicKey` | `key` | its `nodekey:…`, or null |
 | `tailPocket.inviteText` | `text`, `prefix?` | the invite inside `text` (a link, a QR payload), or null |
 | `tailPocket.decodeInvite` | `text`, `prefix?` | `TailPocketInvite` |
-| `tailPocket.scan` | `prefix?` | the invite text from the camera (`cancelled`, `unsupported`) |
-| `tailPocket.pair` | `invite` (text or `TailPocketInvite`), `device`, `save?`, `slot?`, `phoneKey?`, `timeoutMs?`, `derpMapUrl?` | `TailPocketHostLink`; `save` stores it under `slot` (default `"default"`) |
+| `tailPocket.decodeInvite2` | `text`, `prefix?` (default `tailpocket2:`) | `TailPocketInvite2`; a v1 invite comes back as one tailcat route |
+| `tailPocket.scan` | `prefix?`, `prefix2?` | the first invite text from the camera with one of the prefixes; with neither, `tailpocket1:` or `tailpocket2:` (`cancelled`, `unsupported`) |
+| `tailPocket.pair` | `invite` (text, `TailPocketInvite` or `TailPocketInvite2`; pairs over whichever route works), `device`, `save?`, `slot?`, `phoneKey?`, `timeoutMs?`, `derpMapUrl?` | `TailPocketHostLink`; `save` stores it under `slot` (default `"default"`) |
 | `tailPocket.connect` | `link?` or `slot?`, `derpMapUrl?` | `{handle, port, baseUrl}` |
-| `tailPocket.disconnect` | `handle` | |
+| `tailPocket.disconnect` | `handle` | ; a link from the store is saved again if the computer sent new routes |
+| `tailPocket.sync` | `handle`, `timeoutMs?` | the updated `TailPocketHostLink`, saved to its slot: registers the phone's end-to-end key over Tailcat (links from before v0.3) |
+| `tailPocket.path` | `handle`, `timeoutMs?` | `{route, relay}`: `direct`, `relay` or `lan`; rejects `revoked` once the computer removed the phone |
+| `tailPocket.link` | `handle` | the link with the computer's latest routes |
 | `tailPocket.nearby.start` | `service` | then `tailPocket.nearby` events: `{hosts: [{name}]}` |
 | `tailPocket.nearby.stop` | | |
 | `tailPocket.local.begin` | `name` (from `tailPocket.nearby`) or `address`, `device?`, `label?` | `{op, code}`: show `code` |
