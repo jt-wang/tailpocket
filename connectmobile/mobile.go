@@ -365,9 +365,12 @@ func Sync(handle int64, timeoutMs int) string {
 	return text
 }
 
-// Path reports how the handle reaches its host: {"route":"direct"|"relay"|"lan","relay":"<name>"}.
-// Blocking (a Tailcat disco ping, at most timeoutMs). {"error":"revoked"} once the host has said the
-// phone is no longer paired: the forward's connections then close at once; delete the link.
+// Path reports how the handle reaches its host: {"route":"direct"|"relay"|"lan","relay":"<name>"} as
+// before v0.3.1, and since v0.3.1 "kind" ("lan", "direct", "derp" for Tailcat through DERP, "relay" for
+// tailpocket-relay) with, for derp, "derpRegion" (ID), "derpCode" and "derpHost" when known, and for
+// relay, "relayHost". Blocking (a Tailcat disco ping, at most timeoutMs). {"error":"revoked"} once the
+// host has said the phone is no longer paired: the forward's connections then close at once; delete
+// the link.
 func Path(handle int64, timeoutMs int) string {
 	c := lookup(handle)
 	if c == nil {
@@ -378,11 +381,13 @@ func Path(handle int64, timeoutMs int) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeoutOf(timeoutMs))
 	defer cancel()
-	route, relay, err := c.session.Path(ctx)
+	r, err := c.session.Route(ctx)
 	if err != nil {
 		return fail(code(err))
 	}
-	body, _ := json.Marshal(map[string]string{"route": route, "relay": relay})
+	route, relay := r.Path()
+	body, _ := json.Marshal(map[string]any{"route": route, "relay": relay, "kind": r.Kind,
+		"derpRegion": r.DERPRegion, "derpCode": r.DERPCode, "derpHost": r.DERPHost, "relayHost": r.RelayHost})
 	return string(body)
 }
 

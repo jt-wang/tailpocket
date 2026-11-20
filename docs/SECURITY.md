@@ -124,6 +124,14 @@ The relay is trusted for nothing but availability: everything on it is Noise cip
   Authorize runs with phone "" for each opaque connection, the identity line says `opaque`, and
   revoking or disconnecting any phone closes all open ones (`TestAuditOpaqueRelaySkipsAuthorize`,
   `TestAuditRevokedPhoneKeepsOpaqueRoute`, `TestAuditHelperForwardsStrangerOnOpaqueRelay`).
+- **Revoking a phone ends its access at once (v0.3.1).** `Revoke` or a `SetAllowed` that removes a
+  phone closes its open connections on every route before the Tailcat node restarts or stops, so the
+  close reaches the phone (the revoked phone's open connection ended 18 ms after `Revoke` over DERP
+  with UDP blocked, `TestLiveRelayOnly`). From that moment the node, which lingers 3 s for those
+  closes, hands no new connection from the phone to the app, and its encrypted sessions end with
+  bye `unpaired` (`TestRevokingTheLastPhoneClosesItsConnections`,
+  `TestSetAllowedClosesRemovedPhonesBeforeTheNodeStops`,
+  `TestAuditRemovedPhoneConnectsAgainWhileTheNodeLingers`, `TestRevokeOverRelay`).
 - **The phone's local forward (F1).** Any program on a phone can reach a 127.0.0.1 port. The forward
   now carries an HTTP request only under `/_tailpocket/<token>` or with the `Tailpocket-Token`
   header, and a raw connection only after the line `TP-FWD <token>`; the token is 256 random bits

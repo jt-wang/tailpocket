@@ -32,6 +32,7 @@ type fakeNode struct {
 	allowed []key.NodePublic
 	closed  bool
 	conns   []net.Conn // host sides of dialed connections; closing the node closes them, as Tailcat does
+	net     *fakeNet
 }
 
 func (n *fakeNode) Address() string             { return n.addr }
@@ -42,12 +43,38 @@ func (n *fakeNode) Allow(k key.NodePublic) {
 	n.allowed = append(n.allowed, k)
 }
 func (n *fakeNode) Close() error {
+	hang, dead := n.net.modes()
+	if hang != nil {
+		<-hang // tailcat's Close waiting on a WireGuard receive goroutine that never wakes
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.closed = true
+	if dead {
+		return nil
+	}
 	for _, c := range n.conns {
 		_ = c.Close()
 	}
+	return nil
+}
+
+// deadConn is the host side of a connection on a fakeNet with dead set. Its close takes inFlight to
+// reach the phone, and a node that stops before then never sends it, as over DERP: the phone keeps
+// the connection open until its own timeout.
+type deadConn struct {
+	net.Conn
+	n *fakeNode
+}
+
+const inFlight = 100 * time.Millisecond
+
+func (c *deadConn) Close() error {
+	time.AfterFunc(inFlight, func() {
+		if !c.n.isClosed() {
+			_ = c.Conn.Close()
+		}
+	})
 	return nil
 }
 
@@ -68,6 +95,9 @@ func (n *fakeNode) dial(t *testing.T, phone string) net.Conn {
 	c, s := net.Pipe()
 	n.conns = append(n.conns, s)
 	n.mu.Unlock()
+	if _, dead := n.net.modes(); dead {
+		s = &deadConn{Conn: s, n: n}
+	}
 	go n.spec.onTCP(n.spec.port)(&addrConn{Conn: s, remote: &net.TCPAddr{IP: clientIP(k).AsSlice(), Port: 40000}})
 	return c
 }
@@ -91,6 +121,17 @@ type fakeNet struct {
 	mu    sync.Mutex
 	nodes []*fakeNode
 	fail  bool
+	hang  chan struct{} // non-nil: a node's Close waits until it is closed
+	dead  bool          // a stopped node carries nothing: closing its connections afterwards reaches no phone
+}
+
+func (f *fakeNet) modes() (hang chan struct{}, dead bool) {
+	if f == nil {
+		return nil, false
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hang, f.dead
 }
 
 // discoFor mirrors Tailcat, which derives the disco key from the node key: same key, same address.
@@ -112,7 +153,7 @@ func (f *fakeNet) start(ctx context.Context, s nodeSpec) (node, error) {
 	}
 	ci := tailcat.ConnInfo{ServerPublic: tailcat.NodePublic{NodePublic: s.key.Public()},
 		ServerDiscoPublic: tailcat.DiscoPublic{DiscoPublic: discoFor(s.key)}, PresharedKey: s.psk, Region: []*tailcfg.DERPRegion{s.region}}
-	n := &fakeNode{spec: s, addr: string(ci.Addr()), allowed: append([]key.NodePublic{}, s.allowed...)}
+	n := &fakeNode{spec: s, addr: string(ci.Addr()), allowed: append([]key.NodePublic{}, s.allowed...), net: f}
 	f.nodes = append(f.nodes, n)
 	return n, nil
 }

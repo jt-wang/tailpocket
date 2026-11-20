@@ -1,2 +1,6 @@
 # A CocoaPods checksum (React-Fabric), not a key.
 examples/rn-phone/ios/Podfile.lock:generic-api-key:1991
+# RFC 6455's sample Sec-WebSocket-Key ("the sample nonce"), in handshake tests; not a key.
+cmd/tailpocket-relay/failclosed_test.go:generic-api-key:187
+connectrelay/failclosed_test.go:generic-api-key:116
+connectrelay/failclosed_test.go:generic-api-key:573

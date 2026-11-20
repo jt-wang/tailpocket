@@ -162,8 +162,15 @@ phone and host, so a relay sees only ciphertext.
 | tailpocket-relay | `relay` | `u` (`wss://…`; `ws://` only to loopback), `r` (room), `m` | Noise, or with `m: "opaque"` the app's own |
 | direct TCP | `lan` | `a` (`host:port` addresses) | Noise |
 
-Phones skip route types they do not know. A phone tries the route that worked last first, then the
-others in the host's order; each route gets at most 10 s (each lan address 3 s) while others are left.
+Phones skip route types they do not know. A phone tries the route that worked last first, then
+Tailcat, then the others in the host's order; each route gets at most 10 s (each lan address 3 s)
+while others are left. Since v0.3.1, after a connection over a route other than `lan`, the phone tries
+the better routes in the background (`lan` before Tailcat before `relay`), each for at most 5 s and
+at most once per 30 s; the first that answers takes the next connections. Connections already open
+stay where they are, and an encrypted session it replaced closes when its last stream ends. A phone
+set to Tailcat only has no other route to try. Tailcat direct and through DERP are one rank: Tailcat
+itself moves a DERP path to direct when it finds one. A Tailcat probe opens and closes a connection to
+the control port, so the host's Authorize runs once for it (`route` `tailcat`), at most every 30 s.
 
 **Defaults (v0.3.0-pre.4).** With no configuration a host has Tailcat and a `lan` route: it listens
 on every private address (RFC 1918 IPv4, IPv6 ULA) of its up, non-loopback, non-point-to-point

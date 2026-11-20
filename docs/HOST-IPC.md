@@ -115,8 +115,10 @@ not set it to get past the error.
   lost reply is not asked twice.
 
 `confirm` answers whatever the window waits for: a `localCode` (the Bonjour code check, `local`) or
-a `pairRequest` (the emoji check, `emoji` windows). Each window waits for at most one at a time; with
-nothing waiting, `confirm` fails with `nothing-to-confirm`.
+a `pairRequest` (the emoji check, `emoji` windows). An `emoji` window that also serves `local` can
+wait for both at once; `confirm` then answers the one that started waiting first. Each request waits
+from the moment its event goes out, so a `confirm` sent right after it counts; with nothing waiting,
+`confirm` fails with `nothing-to-confirm`.
 
 Error codes. At start: `invalid-config`, `unsupported-version`, `invalid-forward`,
 `invalid-identity`, `invalid-allowed`, `start-failed` (these end the process); a bad `relays` or

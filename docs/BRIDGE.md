@@ -25,7 +25,7 @@ new code on the computer), `unreachable`, `revoked` (the computer removed this p
 | `tailPocket.connect` | `link?` or `slot?`, `derpMapUrl?` | `{handle, port, baseUrl, token}`: `baseUrl` is `http://127.0.0.1:<port>/_tailpocket/<token>` (see below) |
 | `tailPocket.disconnect` | `handle` | ; a link from the store is saved again if the computer sent new routes |
 | `tailPocket.sync` | `handle`, `timeoutMs?` | the updated `TailPocketHostLink`, saved to its slot: registers the phone's end-to-end key over Tailcat (links from before v0.3) |
-| `tailPocket.path` | `handle`, `timeoutMs?` | `{route, relay}`: `direct`, `relay` or `lan`; rejects `revoked` once the computer removed the phone |
+| `tailPocket.path` | `handle`, `timeoutMs?` | `{route, relay}`: `direct`, `relay` or `lan`; since v0.3.1 also `kind` (`lan`, `direct`, `derp`, `relay`), for `derp` `derpRegion`, `derpCode`, `derpHost`, for `relay` `relayHost`; rejects `revoked` once the computer removed the phone |
 | `tailPocket.link` | `handle` | the link with the computer's latest routes |
 | `tailPocket.nearby.start` | `service` | then `tailPocket.nearby` events: `{hosts: [{name}]}` |
 | `tailPocket.nearby.stop` | | |

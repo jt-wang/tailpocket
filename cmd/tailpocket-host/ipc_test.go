@@ -18,6 +18,7 @@ import (
 	"github.com/jt-wang/tailpocket/connectinvite"
 	"github.com/jt-wang/tailpocket/connectphone"
 	"github.com/jt-wang/tailpocket/connectrelay"
+	"github.com/jt-wang/tailpocket/internal/testhook"
 )
 
 func runWith(t *testing.T, config string) (string, error) {
@@ -279,6 +280,8 @@ func TestRelayStatusWithoutPhones(t *testing.T) {
 // TestLiveHelperRelay pairs over a local tailpocket-relay through the helper (the pairing window
 // itself is a real Tailcat node), then connects over the relay with the app authorizing and auditing.
 func TestLiveHelperRelay(t *testing.T) {
+	testhook.NoUpgrade.Store(true) // the phone stays on the relay this test checks
+	defer testhook.NoUpgrade.Store(false)
 	if os.Getenv("TAILPOCKET_LIVE") != "1" {
 		t.Skip("set TAILPOCKET_LIVE=1 to run over real Tailcat relays")
 	}

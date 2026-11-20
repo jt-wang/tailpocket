@@ -220,6 +220,8 @@ func (s *Session) Device() string { return s.device }
 // stopping. Then the conn closes; it waits at most closeGrace for the bye.
 func (s *Session) Close() error { return s.closeWith("stopping") }
 
+const drainCheck = time.Second
+
 // Revoked closes the session the way Close does, but the host's bye says
 // "unpaired": the phone is no longer paired and should not reconnect. Only the
 // host sends it; on the phone it is Close.
@@ -228,6 +230,23 @@ func (s *Session) Revoked() error { return s.Bye("unpaired") }
 // Bye closes the session the way Close does, with this bye code from the host ("busy" when the host
 // turns away a phone's extra session). On the phone it is Close.
 func (s *Session) Bye(code string) error { return s.closeWith(code) }
+
+// Drain closes the session once it carries no stream, checking every drainCheck; the streams open on
+// it go on until they end. The phone drains a session it replaced with one on a better route.
+func (s *Session) Drain() {
+	go func() {
+		t := time.NewTicker(drainCheck)
+		defer t.Stop()
+		for s.streamCount() > 0 {
+			select {
+			case <-s.done:
+				return
+			case <-t.C:
+			}
+		}
+		_ = s.Close()
+	}()
+}
 
 // Started is when the session's handshake finished.
 func (s *Session) Started() time.Time { return s.started }

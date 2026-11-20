@@ -30,6 +30,7 @@ import (
 	"github.com/jt-wang/tailpocket/connectphone"
 	"github.com/jt-wang/tailpocket/connectrelay"
 	"github.com/jt-wang/tailpocket/connectsecure"
+	"github.com/jt-wang/tailpocket/internal/testhook"
 )
 
 const (
@@ -518,6 +519,7 @@ func freeAddr(t *testing.T) string {
 
 // When the relay goes away, a paired phone's next connection takes the lan route.
 func TestRelayDownFallsBackToLAN(t *testing.T) {
+	noUpgrade(t)
 	srv, err := connectrelay.NewServer(connectrelay.Config{Token: relayToken, PublicHost: "127.0.0.1", Logger: log.New(io.Discard, "", 0)})
 	if err != nil {
 		t.Fatal(err)
@@ -549,10 +551,74 @@ func TestRelayDownFallsBackToLAN(t *testing.T) {
 	}
 }
 
+// noUpgrade holds the phone on the route that worked, as before v0.3.1, for the tests of falling back.
+func noUpgrade(t *testing.T) {
+	testhook.NoUpgrade.Store(true)
+	t.Cleanup(func() { testhook.NoUpgrade.Store(false) })
+}
+
+// A phone on the relay that can also reach the host's lan listener moves to lan for its next
+// connections (connectphone Session.upgrade); the connection it holds on the relay goes on, and the
+// relay session closes once that connection ends.
+func TestRelayMovesToLANKeepingOpenConns(t *testing.T) {
+	h, _, _ := newTestHost(t, Config{Relays: []Relay{{URL: startRelay(t), Token: relayToken}}, Listen: []string{freeAddr(t)}})
+	waitRelay(t, h)
+	serveApp(t, h)
+	s, _ := pairOverRelay(t, h, &wire{}, "x")
+	c, err := s.Dial(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	br := bufio.NewReader(c)
+	request := func() error {
+		c.SetDeadline(time.Now().Add(5 * time.Second))
+		io.WriteString(c, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(io.Discard, resp.Body)
+		return err
+	}
+	if err := request(); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if r, _ := s.Route(context.Background()); r.Kind == connectphone.KindLAN {
+			break
+		}
+		if time.Now().After(deadline) {
+			r, err := s.Route(context.Background())
+			t.Fatalf("still on %+v %v 10 s after the relay worked, with lan up", r, err)
+		}
+	}
+	if err := request(); err != nil {
+		t.Fatalf("the connection open on the relay ended with the move to lan: %v", err)
+	}
+	if _, err := get(t, s); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := s.Route(context.Background()); r.Kind != connectphone.KindLAN {
+		t.Fatalf("next connection over %+v, want lan", r)
+	}
+	sessions := func() int { h.mu.Lock(); defer h.mu.Unlock(); return len(h.sessions) }
+	if n := sessions(); n != 2 {
+		t.Fatalf("%d sessions, want the relay one still open and the lan one", n)
+	}
+	c.Close()
+	for deadline := time.Now().Add(5 * time.Second); sessions() != 1; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d sessions 5 s after the relay's last connection closed, want 1", sessions())
+		}
+	}
+}
+
 // The relay path goes silent (no FIN, writes still succeed): the phone's stall check gets no pong and
 // ends the session within 2×Timing.Stall, so the request in flight fails instead of hanging until
 // the TCP timeout or Timing.Idle, and the next Dial goes over lan.
 func TestSilentRelayFallsBackToLAN(t *testing.T) {
+	noUpgrade(t)
 	h, _, _ := newTestHost(t, Config{Relays: []Relay{{URL: startRelay(t), Token: relayToken}}, Listen: []string{freeAddr(t)}})
 	waitRelay(t, h)
 	serveApp(t, h)

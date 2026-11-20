@@ -90,8 +90,32 @@ type runtime struct {
 
 type window struct {
 	p       *connecthost.Pairing
-	confirm chan bool
+	confirm chan bool // cap 2: a pairRequest and a localCode may wait at once
+	pending int       // requests asked whose answer has not come (runtime.mu)
 	local   bool
+}
+
+// await asks the app (ask emits pairRequest or localCode) and waits for its confirm or ctx. The
+// request counts as pending before the event goes out, so an answer that comes at once is not
+// refused with nothing-to-confirm.
+func (r *runtime) await(ctx context.Context, w *window, ask func()) (bool, bool) {
+	r.mu.Lock()
+	w.pending++
+	r.mu.Unlock()
+	ask()
+	select {
+	case ok := <-w.confirm:
+		return ok, true
+	case <-ctx.Done():
+		r.mu.Lock()
+		select {
+		case <-w.confirm: // an answer came as ctx ended: it was for this request
+		default:
+			w.pending--
+		}
+		r.mu.Unlock()
+		return false, false
+	}
 }
 
 // Run speaks the helper protocol (docs/HOST-IPC.md): one config line, then commands, until stdin
@@ -297,9 +321,14 @@ func (r *runtime) handle(c command) {
 			fail("unknown-pairing")
 			return
 		}
-		select {
-		case w.confirm <- c.Approve:
-		default:
+		r.mu.Lock()
+		ok := w.pending > 0
+		if ok {
+			w.pending--
+			w.confirm <- c.Approve
+		}
+		r.mu.Unlock()
+		if !ok {
 			fail("nothing-to-confirm")
 		}
 	case "cancel":
@@ -368,18 +397,17 @@ func (r *runtime) pair(c command, fail func(string)) {
 		payload := c.Payload
 		opts.Payload = func(connecthost.Phone) (string, error) { return payload, nil }
 	}
-	w := &window{confirm: make(chan bool)}
+	w := &window{confirm: make(chan bool, 2)}
 	if c.Emoji {
 		opts.Confirm = func(ctx context.Context, req connecthost.PairRequest) bool {
-			r.emit(map[string]any{"event": "pairRequest", "id": c.ID, "phone": req.Phone, "device": req.Device,
-				"route": req.Route, "emoji": req.Emoji})
-			select {
-			case ok := <-w.confirm:
-				return ok
-			case <-ctx.Done():
+			ok, answered := r.await(ctx, w, func() {
+				r.emit(map[string]any{"event": "pairRequest", "id": c.ID, "phone": req.Phone, "device": req.Device,
+					"route": req.Route, "emoji": req.Emoji})
+			})
+			if !answered {
 				r.emit(map[string]any{"event": "pairRequestCancelled", "id": c.ID})
-				return false
 			}
+			return ok
 		}
 	}
 	p, err := r.h.Pair(r.ctx, opts)
@@ -456,14 +484,13 @@ func (r *runtime) local(c command, fail func(string)) {
 		defer r.wg.Done()
 		err := w.p.ServeLocal(r.ctx, connecthost.LocalOptions{Service: c.Service, Label: c.Label, Instance: c.Instance,
 			Confirm: func(ctx context.Context, code, device string) bool {
-				r.emit(map[string]any{"event": "localCode", "id": c.ID, "code": code, "device": device})
-				select {
-				case ok := <-w.confirm:
-					return ok
-				case <-ctx.Done():
+				ok, answered := r.await(ctx, w, func() {
+					r.emit(map[string]any{"event": "localCode", "id": c.ID, "code": code, "device": device})
+				})
+				if !answered {
 					r.emit(map[string]any{"event": "localCancelled", "id": c.ID})
-					return false
 				}
+				return ok
 			}})
 		switch {
 		case err == nil:

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/jt-wang/tailpocket/internal/closing"
 	"github.com/tailscale/tailcat"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
@@ -44,6 +45,9 @@ func (n *tailNode) Region() *tailcfg.DERPRegion { return n.region }
 func (n *tailNode) Allow(k key.NodePublic)      { n.server.AddAllowedClient(k) }
 func (n *tailNode) Close() error                { return n.server.Close() }
 
+// closeNode closes n, waiting at most closing.Timeout (tailcat's Close has no limit).
+func closeNode(n node) error { return closing.Within(n.Close) }
+
 func realStart(ctx context.Context, s nodeSpec) (node, error) {
 	if len(s.allowed) == 0 {
 		return nil, errors.New("connecthost: refusing to start a node that admits every client")
@@ -65,7 +69,7 @@ func realStart(ctx context.Context, s nodeSpec) (node, error) {
 	case <-ctx.Done():
 		go func() {
 			if <-errc == nil {
-				once.Do(func() { _ = server.Close() })
+				once.Do(func() { _ = closing.Within(server.Close) })
 			}
 		}()
 		return nil, ctx.Err()
@@ -77,7 +81,7 @@ func realStart(ctx context.Context, s nodeSpec) (node, error) {
 	addr := string(server.TailcatAddr())
 	info, err := tailcat.ParseAddr(tailcat.Addr(addr))
 	if err != nil || !strings.HasPrefix(addr, "tc") || len(info.Region) != 1 || info.Region[0] == nil {
-		_ = server.Close()
+		_ = closing.Within(server.Close)
 		return nil, errors.New("connecthost: node started without a usable address")
 	}
 	return &tailNode{server: server, addr: addr, region: info.Region[0]}, nil

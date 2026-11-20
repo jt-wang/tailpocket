@@ -160,7 +160,7 @@ func (h *Host) Pair(ctx context.Context, opts PairOptions) (*Pairing, error) {
 	p.inv = connectinvite.Invite{Version: connectinvite.Version, Address: n.Address(), Port: int(h.pairingPort), Key: string(clientText),
 		Proof: connectinvite.NewProof(), ExpiresAt: expires.Unix(), Name: h.name}
 	if err := p.inv.Validate(); err != nil {
-		_ = n.Close()
+		_ = closeNode(n)
 		return nil, err
 	}
 	p.server = &http.Server{Handler: p, ReadHeaderTimeout: 5 * time.Second}
@@ -260,7 +260,7 @@ func (p *Pairing) closeNode() {
 		}
 		p.mu.Unlock()
 		if p.node != nil {
-			_ = p.node.Close()
+			_ = closeNode(p.node)
 		}
 		p.h.mu.Lock()
 		delete(p.h.linger, p)

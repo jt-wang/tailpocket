@@ -9,6 +9,7 @@ package connectphone
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -18,6 +19,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,18 +34,24 @@ import (
 	"github.com/jt-wang/tailpocket/connectinvite"
 	"github.com/jt-wang/tailpocket/connectrelay"
 	"github.com/jt-wang/tailpocket/connectsecure"
+	"github.com/jt-wang/tailpocket/internal/closing"
+	"github.com/jt-wang/tailpocket/internal/testhook"
 )
 
 // Version is the library version the phone sends in its encrypted hello.
-const Version = "0.3.0"
+const Version = "0.3.1"
 
 // ErrRevoked: the host said, encrypted, that this phone is no longer paired. Pair again.
 var ErrRevoked = errors.New("connectphone: the host no longer has this phone paired")
 
 // perRoute bounds one route's attempt while others are left to try; lanDial bounds each lan address.
+// After a Dial, the session looks for a better route in the background (Session.upgrade), each for
+// at most upgradeTry, once per upgradeRetry.
 const (
-	perRoute = 10 * time.Second
-	lanDial  = 3 * time.Second
+	perRoute     = 10 * time.Second
+	lanDial      = 3 * time.Second
+	upgradeTry   = 5 * time.Second
+	upgradeRetry = 30 * time.Second
 )
 
 // noiseKeys is the phone's Noise static key pair, derived from its Tailcat key with a label so the two
@@ -104,7 +113,10 @@ type Session struct {
 	last    string // the route that worked last (routeKey)
 	sec     *connectsecure.Session
 	secKey  string
+	drained []*connectsecure.Session // replaced sessions still carrying connections (Drain)
 	revoked bool
+	closed  bool
+	upTry   time.Time // when Dial last looked for a better route (upgrade)
 }
 
 // Connect prepares a session; nothing goes over the network until the first Dial.
@@ -172,7 +184,7 @@ func (s *Session) attemptsLocked() []connectinvite.Route {
 // Dial opens one connection to the host's app, over the first route that answers.
 func (s *Session) Dial(ctx context.Context) (net.Conn, error) {
 	s.mu.Lock()
-	revoked, list := s.revoked, s.attemptsLocked()
+	revoked, list, start := s.revoked, s.attemptsLocked(), s.last
 	s.mu.Unlock()
 	if revoked {
 		return nil, ErrRevoked
@@ -190,8 +202,11 @@ func (s *Session) Dial(ctx context.Context) (net.Conn, error) {
 		cancel()
 		if err == nil {
 			s.mu.Lock()
-			s.last = routeKey(r)
+			if s.last == start || s.last == "" { // not when upgrade moved the session meanwhile
+				s.last = routeKey(r)
+			}
 			s.mu.Unlock()
+			s.upgrade(list, r)
 			return c, nil
 		}
 		if errors.Is(err, ErrRevoked) || errors.Is(err, ErrUnauthorized) || errors.Is(err, connectsecure.ErrProtoMismatch) {
@@ -207,6 +222,77 @@ func (s *Session) Dial(ctx context.Context) (net.Conn, error) {
 		return nil, fmt.Errorf("%w: %w: %v", ErrUnreachable, connectsecure.ErrHandshakeClosed, all)
 	}
 	return nil, fmt.Errorf("%w: %v", ErrUnreachable, all)
+}
+
+// rank orders routes from best to worst: lan, Tailcat (direct, or DERP until magicsock finds a direct
+// path), then tailpocket-relay.
+func rank(r connectinvite.Route) int {
+	switch r.T {
+	case connectinvite.RouteLAN:
+		return 0
+	case connectinvite.RouteTailcat:
+		return 1
+	}
+	return 2
+}
+
+// upgrade looks for a better route than cur, the one a Dial just used, so a phone that reached the
+// host over DERP or the relay moves to lan once lan answers, and from the relay to Tailcat. It tries in
+// the background, each route for at most upgradeTry, at most once per upgradeRetry. The connections
+// already open stay where they are: a replaced encrypted session drains (connectsecure
+// Session.Drain); the next Dial takes the better route. When the phone leaves that network, its lan
+// session stalls and the next Dial starts again from Tailcat.
+func (s *Session) upgrade(list []connectinvite.Route, cur connectinvite.Route) {
+	var better []connectinvite.Route
+	for _, r := range list {
+		if rank(r) < rank(cur) {
+			better = append(better, r)
+		}
+	}
+	if len(better) == 0 || testhook.NoUpgrade.Load() {
+		return
+	}
+	slices.SortStableFunc(better, func(a, b connectinvite.Route) int { return rank(a) - rank(b) })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || time.Since(s.upTry) < upgradeRetry || s.last != routeKey(cur) {
+		return
+	}
+	s.upTry = time.Now()
+	go func() {
+		for _, r := range better {
+			ctx, cancel := context.WithTimeout(context.Background(), upgradeTry)
+			err := s.probe(ctx, r)
+			cancel()
+			if err != nil {
+				continue
+			}
+			s.mu.Lock()
+			if s.last == routeKey(cur) {
+				s.last = routeKey(r)
+			}
+			s.mu.Unlock()
+			return
+		}
+	}()
+}
+
+// probe checks that route r reaches the host without opening a connection to the app: an encrypted
+// route starts its session (which the next Dial uses), Tailcat opens and closes a connection to the
+// host's control port.
+func (s *Session) probe(ctx context.Context, r connectinvite.Route) error {
+	if r.T != connectinvite.RouteTailcat {
+		_, err := s.secure(ctx, r)
+		return err
+	}
+	s.mu.Lock()
+	client := s.client
+	s.mu.Unlock()
+	c, err := client.DialTCPPort(ctx, connectinvite.ControlPort)
+	if err != nil {
+		return err
+	}
+	return c.Close()
 }
 
 func (s *Session) dialRoute(ctx context.Context, r connectinvite.Route) (net.Conn, error) {
@@ -242,6 +328,14 @@ func (s *Session) dialRoute(ctx context.Context, r connectinvite.Route) (net.Con
 
 // secure returns the encrypted session on route r, starting one if none is live.
 func (s *Session) secure(ctx context.Context, r connectinvite.Route) (*connectsecure.Session, error) {
+	// A live session on r needs no secMu: a Dial must not wait behind another route's handshake
+	// (an upgrade probe of a lan address that never answers).
+	s.mu.Lock()
+	live, liveKey := s.sec, s.secKey
+	s.mu.Unlock()
+	if live != nil && liveKey == routeKey(r) && live.Err() == nil {
+		return live, nil
+	}
 	s.secMu.Lock()
 	defer s.secMu.Unlock()
 	s.mu.Lock()
@@ -277,11 +371,20 @@ func (s *Session) secure(ctx context.Context, r connectinvite.Route) (*connectse
 		return nil, err
 	}
 	s.mu.Lock()
+	if s.closed { // Close ran during the handshake (a background upgrade)
+		s.mu.Unlock()
+		_ = sess.Close()
+		return nil, net.ErrClosed
+	}
 	old := s.sec
 	s.sec, s.secKey = sess, routeKey(r)
+	if old != nil {
+		s.drained = slices.DeleteFunc(s.drained, func(d *connectsecure.Session) bool { return d.Err() != nil })
+		s.drained = append(s.drained, old)
+	}
 	s.mu.Unlock()
 	if old != nil {
-		_ = old.Close()
+		old.Drain() // its open connections go on; it closes when the last one ends
 	}
 	go s.watch(sess)
 	return sess, nil
@@ -400,58 +503,106 @@ func (s *Session) Forward() (*Forward, error) {
 // Close ends the session's Tailcat client and its encrypted session.
 func (s *Session) Close() error {
 	s.mu.Lock()
-	client, sec := s.client, s.sec
-	s.sec = nil
+	client, sec, drained := s.client, s.sec, s.drained
+	s.sec, s.drained, s.closed = nil, nil, true
 	s.mu.Unlock()
 	if sec != nil {
 		_ = sec.Close()
 	}
+	for _, d := range drained {
+		_ = d.Close()
+	}
 	if client != nil {
-		return client.Close()
+		return closing.Within(client.Close)
 	}
 	return nil
 }
 
-// Path reports how the session reaches the host: over Tailcat "direct", or "relay" with the DERP
-// region code when it has one; over tailpocket-relay "relay" with the relay's host name; or "lan".
-// For Tailcat it sends a disco ping and waits for the pong, which also nudges the client to look for a
-// direct path (tailcat v0.6.0 Client.DiscoPing).
-func (s *Session) Path(ctx context.Context) (route, relay string, err error) {
+// Route kinds: how a Session reaches its host.
+const (
+	KindLAN    = "lan"    // the host's lan listener, Noise over TCP
+	KindDirect = "direct" // Tailcat, peer to peer (WireGuard over UDP)
+	KindDERP   = "derp"   // Tailcat through one of its DERP relays
+	KindRelay  = "relay"  // tailpocket-relay
+)
+
+// Route says how the session reaches the host now.
+type Route struct {
+	Kind string
+	// Kind derp: the DERP region's ID, its code ("" when the Tailcat address carries the region without
+	// one; tailcat then makes up the ID as the code), and the host name of its first DERP server when the
+	// address carries the region.
+	DERPRegion int
+	DERPCode   string
+	DERPHost   string
+	// Kind relay: the tailpocket-relay's host name.
+	RelayHost string
+}
+
+// Route reports how the session reaches the host. For Tailcat it sends a disco ping and waits for the
+// pong, which also nudges the client to look for a direct path (tailcat v0.6.0 Client.DiscoPing).
+func (s *Session) Route(ctx context.Context) (Route, error) {
 	s.mu.Lock()
-	last, client := s.last, s.client
+	last, client, address := s.last, s.client, s.link.Address
 	s.mu.Unlock()
 	switch {
 	case strings.HasPrefix(last, connectinvite.RouteRelay+" "):
-		return "relay", connectrelay.NormalizeHost(strings.TrimPrefix(last, connectinvite.RouteRelay+" ")), nil
+		return Route{Kind: KindRelay, RelayHost: connectrelay.NormalizeHost(strings.TrimPrefix(last, connectinvite.RouteRelay+" "))}, nil
 	case strings.HasPrefix(last, connectinvite.RouteLAN+" "):
-		return "lan", "", nil
+		return Route{Kind: KindLAN}, nil
 	case client == nil:
-		return "", "", ErrUnreachable
+		return Route{}, ErrUnreachable
 	}
-	return routeOf(client.DiscoPing(ctx))
+	res, err := client.DiscoPing(ctx)
+	return routeOf(res, err, address)
 }
 
-// routeOf reads a pong: it came over a direct path if it names an endpoint, otherwise through a relay.
-func routeOf(res *ipnstate.PingResult, err error) (route, relay string, _ error) {
+// Path is Route as before v0.3.1 (Route.Path).
+func (s *Session) Path(ctx context.Context) (route, relay string, err error) {
+	r, err := s.Route(ctx)
 	if err != nil {
 		return "", "", err
 	}
-	if res.Err != "" {
-		return "", "", errors.New("connectphone: " + res.Err)
-	}
-	if res.Endpoint != "" {
-		return "direct", "", nil
-	}
-	return "relay", relayName(res.DERPRegionCode), nil
+	route, relay = r.Path()
+	return route, relay, nil
 }
 
-// relayName drops the code tailcat.ParseAddr makes up: an address that carries its relay leaves the name
-// out, and parsing fills in the relay's position, "1" (tailcat v0.6.0 tailcat.go:1089).
-func relayName(code string) string {
-	if strings.Trim(code, "0123456789") == "" {
-		return ""
+// Path is r the way Session.Path reported it before v0.3.1: "direct"; "relay" with the
+// tailpocket-relay's host name, or with the DERP region's code, its server's host name, or
+// "tailcat-derp" (never "" since v0.3.1); or "lan".
+func (r Route) Path() (route, relay string) {
+	switch r.Kind {
+	case KindDERP:
+		return "relay", cmp.Or(r.DERPCode, r.DERPHost, "tailcat-derp")
+	case KindRelay:
+		return "relay", r.RelayHost
 	}
-	return code
+	return r.Kind, ""
+}
+
+// routeOf reads a pong: it came over a direct path if it names an endpoint, otherwise through DERP.
+func routeOf(res *ipnstate.PingResult, err error, address string) (Route, error) {
+	if err != nil {
+		return Route{}, err
+	}
+	if res.Err != "" {
+		return Route{}, errors.New("connectphone: " + res.Err)
+	}
+	if res.Endpoint != "" {
+		return Route{Kind: KindDirect}, nil
+	}
+	r := Route{Kind: KindDERP, DERPRegion: int(res.DERPRegionID), DERPCode: res.DERPRegionCode}
+	if r.DERPCode == strconv.Itoa(r.DERPRegion) {
+		r.DERPCode = "" // made up by tailcat.ParseAddr (tailcat v0.6.0 tailcat.go:1089)
+	}
+	if ci, err := tailcat.ParseAddr(tailcat.Addr(address)); err == nil {
+		for _, reg := range ci.Region {
+			if int(reg.RegionID) == r.DERPRegion && len(reg.Nodes) > 0 {
+				r.DERPHost = reg.Nodes[0].HostName
+			}
+		}
+	}
+	return r, nil
 }
 
 // Sync registers the phone's Noise key with the host over Tailcat and takes the host's key and
@@ -633,7 +784,7 @@ func pairOnce(ctx context.Context, r connectinvite.Route, cfg connectsecure.Clie
 			return Link{}, errors.New("connectphone: invalid invite")
 		}
 		client := &tailcat.Client{Server: tailcat.Addr(r.Inv.Address), Key: oneTime, Logf: func(string, ...any) {}, DERPMapURL: opts.DERPMapURL}
-		defer client.Close()
+		defer closing.Within(client.Close)
 		raw, err = client.DialTCPPort(ctx, uint16(r.Inv.Port))
 	} else {
 		raw, err = dialRaw(ctx, r, opts.HTTPClient)

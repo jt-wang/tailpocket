@@ -20,6 +20,7 @@ import (
 	"github.com/jt-wang/tailpocket/connectinvite"
 	"github.com/jt-wang/tailpocket/connectlocal"
 	"github.com/jt-wang/tailpocket/connectmdns"
+	"github.com/jt-wang/tailpocket/internal/closing"
 )
 
 var (
@@ -163,7 +164,7 @@ func Pair(ctx context.Context, inv connectinvite.Invite, phoneKey string, opts O
 	var oneTime key.NodePrivate
 	_ = oneTime.UnmarshalText([]byte(inv.Key))
 	client := &tailcat.Client{Server: tailcat.Addr(inv.Address), Key: oneTime, Logf: func(string, ...any) {}, DERPMapURL: opts.DERPMapURL}
-	defer client.Close()
+	defer closing.Within(client.Close)
 	port := uint16(inv.Port)
 	httpClient := &http.Client{Transport: &http.Transport{DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return client.DialTCPPort(ctx, port) }}}

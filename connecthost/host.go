@@ -7,12 +7,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"tailscale.com/types/key"
 
@@ -78,7 +80,9 @@ type Config struct {
 	TailcatOnly bool
 	// Authorize, when set, decides every connection from a known phone before the app sees it: an error
 	// closes it (an encrypted session gets bye "denied"). It runs for every route; on an opaque relay,
-	// which carries no phone identity, phone is "" (deny it unless the app's own layer decides).
+	// which carries no phone identity, phone is "" (deny it unless the app's own layer decides). Since
+	// v0.3.1 a phone on a worse route checks Tailcat at most every 30 s with a connection to the control
+	// port, which also runs Authorize (route "tailcat") and closes at once.
 	Authorize func(phone, route string) error
 	// Audit, when set, gets one Event per pairing, revoke, session and refusal. It never gets keys,
 	// codes or payloads.
@@ -128,6 +132,7 @@ type Host struct {
 	main     node
 	pairings map[*Pairing]struct{}
 	linger   map[*Pairing]struct{} // ended windows whose Tailcat node outlives a refusal (byeLinger)
+	retired  node                  // the main node after its last phone went, for byeLinger (retireMain)
 	closed   bool
 
 	noise    map[key.NodePublic][32]byte       // phone -> its Noise public key
@@ -295,12 +300,39 @@ func (h *Host) flushLocked() error {
 func (h *Host) restartMain(ctx context.Context, keys []key.NodePublic) error {
 	h.mu.Lock()
 	id, old, prev := h.id, h.main, slices.Clone(h.allowed)
+	// Close the removed phones' connections while the node that carries them still runs, and give
+	// the closes byeLinger to reach the phones: closed over a stopped node, they never did, and a
+	// revoked phone kept its open connections until its own timeout.
+	// From here the removed phones get nothing on any route while the old node lingers: the node hands
+	// none of their dials to the app (byIP), and their encrypted sessions end with bye unpaired and no
+	// new one is admitted (noise). If the restart or the save fails below, the keys come back but the
+	// phones already heard unpaired: that fails closed, they pair again.
+	leaving := removedKeys(prev, keys)
+	early := h.takeConnsLocked(leaving)
+	cut := map[key.NodePublic][32]byte{}
+	for k, v := range h.noise {
+		if leaving[k.String()] {
+			cut[k] = v
+			delete(h.noise, k)
+		}
+	}
+	earlySessions := h.takeSessionsLocked(leaving)
+	if len(leaving) > 0 {
+		h.byIP = indexKeys(keys)
+	}
 	h.mu.Unlock()
+	closeConns(early)
+	revokeSessions(earlySessions)
+	linger := old != nil && slices.ContainsFunc(early, func(c *Conn) bool { return c.Route == RouteTailcat })
+	if linger && len(keys) > 0 {
+		time.Sleep(byeLinger) // the new node has the old one's key: the old one must stop first
+	}
+	h.closeRetired(nil)
 	var next node
 	if len(keys) > 0 {
 		var err error
 		if old != nil {
-			_ = old.Close() // the address is the node key's; two live nodes with it would fight
+			_ = closeNode(old) // the address is the node key's; two live nodes with it would fight
 		}
 		h.mu.Lock()
 		h.byIP = indexKeys(keys) // the new node may hand over connections before start returns
@@ -310,6 +342,7 @@ func (h *Host) restartMain(ctx context.Context, keys []key.NodePublic) error {
 		if err != nil {
 			h.mu.Lock()
 			h.byIP = indexKeys(prev)
+			maps.Copy(h.noise, cut)
 			h.mu.Unlock()
 			if old != nil {
 				h.mu.Lock()
@@ -335,10 +368,11 @@ func (h *Host) restartMain(ctx context.Context, keys []key.NodePublic) error {
 	h.mu.Unlock()
 	if err := h.save(st); err != nil {
 		if next != nil {
-			_ = next.Close()
+			_ = closeNode(next)
 		}
 		h.mu.Lock()
 		h.byIP = indexKeys(prev)
+		maps.Copy(h.noise, cut)
 		h.mu.Unlock()
 		if old != nil && len(keys) > 0 {
 			// Bring back what was running before.
@@ -353,9 +387,6 @@ func (h *Host) restartMain(ctx context.Context, keys []key.NodePublic) error {
 			}
 		}
 		return fmt.Errorf("connecthost: saving state: %w", err)
-	}
-	if old != nil && len(keys) == 0 {
-		_ = old.Close()
 	}
 	h.mu.Lock()
 	h.id, h.main, h.allowed, h.dirty = id, next, slices.Clone(keys), false
@@ -372,11 +403,40 @@ func (h *Host) restartMain(ctx context.Context, keys []key.NodePublic) error {
 	h.mu.Unlock()
 	closeConns(dropped)
 	revokeSessions(sessions)
+	if old != nil && len(keys) == 0 {
+		if linger {
+			h.retireMain(old)
+		} else {
+			_ = closeNode(old)
+		}
+	}
 	if closed && next != nil {
-		_ = next.Close()
+		_ = closeNode(next)
 		return ErrClosed
 	}
 	return nil
+}
+
+// retireMain closes n, the main node after its last phone was removed, byeLinger from now, so the
+// closes of that phone's connections reach it first.
+func (h *Host) retireMain(n node) {
+	h.mu.Lock()
+	h.retired = n
+	h.mu.Unlock()
+	time.AfterFunc(byeLinger, func() { h.closeRetired(n) })
+}
+
+// closeRetired closes the retired main node now: n, or whichever there is when n is nil.
+func (h *Host) closeRetired(n node) {
+	h.mu.Lock()
+	r := h.retired
+	if r == nil || (n != nil && r != n) {
+		h.mu.Unlock()
+		return
+	}
+	h.retired = nil
+	h.mu.Unlock()
+	_ = closeNode(r)
 }
 
 // addPhone admits k on the main node, starting it if needed, and returns the main address. A Noise
@@ -576,9 +636,6 @@ func (h *Host) Close() error {
 		conns = append(conns, c)
 	}
 	h.mu.Unlock()
-	for _, p := range pairings {
-		p.Close()
-	}
 	for _, l := range routeLns {
 		_ = l.ln.Close()
 	}
@@ -588,10 +645,17 @@ func (h *Host) Close() error {
 	for _, s := range sessions {
 		_ = s.Close() // bye stopping
 	}
-	if main != nil {
-		_ = main.Close()
+	closeConns(conns) // while the nodes still carry the close to the phones
+	// Each node takes at most closing.Timeout to close; close them together.
+	var wg sync.WaitGroup
+	for _, p := range pairings {
+		wg.Go(p.Close)
 	}
-	closeConns(conns)
+	if main != nil {
+		wg.Go(func() { _ = closeNode(main) })
+	}
+	wg.Go(func() { h.closeRetired(nil) })
+	wg.Wait()
 	_ = h.control.Close()
 	return h.listener.Close()
 }
