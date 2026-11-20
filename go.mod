@@ -63,6 +63,7 @@ require (
 )
 
 retract (
+	[v0.2.2, v0.2.4] // same-Wi-Fi pairing (H1): someone on the Wi-Fi can make both 6-digit codes match and pair their own device; use v0.3.0
 	v0.3.0-pre.4 // same-Wi-Fi pairing: retrying attempts can make the codes match (fixed in v0.3.0-pre.5, v0.3.0-pre.6)
 	v0.3.0-pre.3 // same-Wi-Fi pairing has no commitment: someone on the Wi-Fi can make the codes match
 )

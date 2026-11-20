@@ -6,14 +6,14 @@ nothing to clone, no Go or gomobile. To build them yourself, see [BUILD.md](BUIL
 
 ## 0. The packages
 
-`R=https://github.com/jt-wang/tailpocket/releases/download/v0.2.4` below.
+`R=https://github.com/jt-wang/tailpocket/releases/download/v0.3.0` below.
 
 | Side | Get it |
 |---|---|
 | Computer, Node | `npm install $R/tailpocket-node.tgz` (the helper for macOS, Linux and Windows is inside) |
-| Computer, Go | `go get github.com/jt-wang/tailpocket@v0.2.4` |
+| Computer, Go | `go get github.com/jt-wang/tailpocket@v0.3.0` |
 | Computer, any language | the helper `$R/tailpocket-host-<os>-<arch>` (`darwin-arm64`, `darwin-amd64`, `linux-amd64`, `linux-arm64`, `windows-amd64.exe`) |
-| Phone, Swift | Swift package `https://github.com/jt-wang/tailpocket`, from `0.2.0` |
+| Phone, Swift | Swift package `https://github.com/jt-wang/tailpocket`, from `0.3.0` |
 | Phone, Kotlin | unzip `$R/tailpocket-android-m2.zip` into your project and add its `m2` folder as a Maven repository |
 | Phone, React Native | `npm install $R/react-native-tailpocket.tgz` |
 | Phone, NSH | `npm install $R/tailpocket-client.tgz`, and the native adapter from the Swift or Kotlin row |
@@ -43,15 +43,15 @@ at once, so send anything the phone should hear (such as "you were removed") bef
 
 Check: run your app, open a pairing window, and pair with the CLI phone:
 `tailpocket-phone-<os>-<arch> pair -key phone.key -out link.json -` with the QR text on stdin, then
-`connect -link link.json` and request your server through the printed `127.0.0.1` port. From
-v0.3.0-pre.4 it prints a `base` URL with a token in its path: request under it (`curl <base>/`).
+`connect -link link.json`, which prints a `base` URL with a token in its path, and request your server
+under it (`curl <base>/`).
 
 ## 2. The phone side
 
 Pick a Bonjour service type for your app (`_myapp._tcp`, at most 15 characters between `_` and
 `._tcp`) and use the same one on both sides.
 
-**iOS / macOS (Swift):** add the Swift package `https://github.com/jt-wang/tailpocket` (from `0.2.0`; it
+**iOS / macOS (Swift):** add the Swift package `https://github.com/jt-wang/tailpocket` (from `0.3.0`; it
 downloads the prebuilt `TailPocketMobile.xcframework` from the release); depend on `TailPocket`
 and, for the camera scanner and pairing view, `TailPocketUI`. In Info.plist add
 `NSCameraUsageDescription`, `NSLocalNetworkUsageDescription`, and your service under
@@ -62,7 +62,7 @@ Check: `swift test`; with the computer running, `TAILPOCKET_LIVE=1 swift test --
 
 **Android (Kotlin):** unzip `tailpocket-android-m2.zip` into your project, add
 `maven { url = uri("m2") }` (the path to that folder) and depend on
-`io.jingtao.tailpocket:tailpocket:0.2.4` (and `tailpocket-ui` for the Compose
+`io.jingtao.tailpocket:tailpocket:0.3.0` (and `tailpocket-ui` for the Compose
 scanner and `TailPocketPairingScreen`). The libraries declare INTERNET, ACCESS_NETWORK_STATE and CAMERA.
 Set `android:networkSecurityConfig="@xml/tailpocket_network_security_config"` on your
 `<application>` (or add its `127.0.0.1` domain-config to your own config): Android refuses plain
@@ -98,11 +98,10 @@ real host.
 4. Pair over the same Wi-Fi: both screens show the same 6-digit code.
 5. Revoke the phone on the computer: its next connection fails.
 
-## 4. v0.3 (pre-release)
+## 4. What v0.3 adds
 
-The packages above are v0.2.4. To try v0.3, take them from the newest `v0.3.0-pre.*` release under
-[releases](https://github.com/jt-wang/tailpocket/releases) instead; everything in sections 1 to 3
-still applies, with these changes.
+The packages above are v0.3.0. Everything in sections 1 to 3 applies, with these additions. Moving
+from v0.2, read the upgrade notes under v0.3.0 in [CHANGELOG.md](../CHANGELOG.md) first.
 
 ### Defaults: nothing to configure
 
@@ -142,9 +141,9 @@ route, Tailcat included:
   confirms on the computer only.
 
 A window without `emoji` hands out only the v1 `qr` (Tailcat, as in v0.2). Same-Wi-Fi pairing
-without a camera (`pairing.local`) still shows a 6-digit code on both screens; from v0.3.0-pre.4 its
+without a camera (`pairing.local`) still shows a 6-digit code on both screens; in v0.3 its
 wire protocol is version 2 (the phone commits to its key before it sees the computer's), so phone
-and computer must both be pre.4 or later. From pre.5 a window lets at most 3 phones try and then
+and computer must both be v0.3. A window lets at most 3 phones try and then
 closes with `local-too-many-attempts` (Go: `connectlocal.ErrTooManyAttempts`, and the whole window
 ends): tell the user to start again. `ServeLocal` runs once per window.
 
@@ -184,7 +183,7 @@ the connection's token, and your app MUST follow these rules:
 ### Compatibility
 
 - Phones on v0.2 keep using Tailcat with a v0.3 computer; nothing to pair again.
-- A v0.3.0-pre.3 phone still connects to a pre.4 computer over every route, but pairs with it only
-  through a v1 window. Pairing over a v2 invite needs pre.4 on both sides.
-- A phone app moving to pre.4 MUST take its URLs from `baseUrl` (see above); code that builds
+- Pairing over a v2 invite (`qr2`) and same-Wi-Fi pairing need v0.3 on both sides: upgrade the phone
+  app and the computer together.
+- A phone app moving to v0.3 MUST take its URLs from `baseUrl` (see above); code that builds
   `http://127.0.0.1:<port>` from the port gets 403.

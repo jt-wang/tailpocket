@@ -186,3 +186,8 @@ See [PUSH.md](PUSH.md); the gateway (`cmd/tailpocket-push`) is code only, not de
   room name is public, so its 16 phone slots can be filled. Phones go to their next route.
 - A computer or phone that is itself compromised.
 - What the user approves: the emoji and the 6-digit code protect a user who compares them.
+- A pairing invite holder claiming another phone's nodekey over Tailcat (as in v0.2). `/pair` over
+  Tailcat treats the phone key as a claim and takes no Noise key with it. Someone holding an invite
+  can register another phone's nodekey that way; that phone then cannot pair over a relay or the
+  local network until it pairs again over Tailcat and syncs its key. The claimant never gets a
+  session as that phone on any route (`TestReviewTailcatPairingTakesAnyNodekey`).
