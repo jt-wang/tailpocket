@@ -16,6 +16,10 @@ lines.on('line', async (line) => {
     if (relays.some((r) => r.opaque && !r.appAuth) || (config.tailcatOnly && (relays.length || config.listen?.length)) || (config.noLan && config.listen?.length)) {
       out({ event: 'error', code: 'invalid-config' }); process.exit(1);
     }
+    const set = config.routes;
+    if (set && (!set.length || (set.includes('relay') !== relays.length > 0) || (!set.includes('lan') && config.listen?.length) || config.tailcatOnly || config.noLan)) {
+      out({ event: 'error', code: 'invalid-config', message: 'connecthost: invalid routes' }); process.exit(1);
+    }
     allowed = config.allowed ?? [];
     out({ event: 'ready', address: allowed.length ? 'tcFAKE' : '' });
     if (config.authorize) setTimeout(() => connect(allowed[0]), 20); // a paired phone connects
@@ -24,7 +28,8 @@ lines.on('line', async (line) => {
   switch (msg.cmd) {
     case 'saved': case 'authorized': waiting.get(msg.id)?.(msg.ok); waiting.delete(msg.id); break;
     case 'status': {
-      const routes = config.tailcatOnly ? [{ t: 'tailcat' }] : [...(config.relays ?? []).map((r) => ({ t: 'relay', u: r.url, r: 'ROOM', ...(r.opaque ? { m: 'opaque' } : {}) })),
+      const routes = config.routes ? [...(config.relays ?? []).map((r) => ({ t: 'relay', u: r.url, r: 'ROOM' })),
+        ...(config.routes.includes('lan') ? [{ t: 'lan', a: ['192.168.1.20'], p: 7681 }] : [])] : config.tailcatOnly ? [{ t: 'tailcat' }] : [...(config.relays ?? []).map((r) => ({ t: 'relay', u: r.url, r: 'ROOM', ...(r.opaque ? { m: 'opaque' } : {}) })),
         ...(config.noLan ? [] : [{ t: 'lan', a: ['192.168.1.20'], p: 7681 }])];
       out({ event: 'status', id: msg.id, address: '', routes, relays: Object.fromEntries((config.relays ?? []).map((r) => [r.url, 'up'])) });
       break;

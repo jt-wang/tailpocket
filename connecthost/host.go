@@ -78,6 +78,13 @@ type Config struct {
 	// TailcatOnly runs the host as before v0.3: Tailcat only, no local network listener, no relay, and
 	// v2 invites and routes list only Tailcat. Relays and Listen must be empty.
 	TailcatOnly bool
+	// Routes, when set, is exactly the routes the host runs: one or more of RouteTailcat, RouteLAN and
+	// RouteRelay (v0.3.2). Without RouteTailcat the host starts no Tailcat node at all, for pairing
+	// either, and talks to no Tailcat control or DERP server; v2 invites and routes list only the
+	// others, and v1 invites (Invite, QR, ServeLocal) are unavailable. RouteRelay needs Relays, and
+	// Relays or Listen need their route. Nil keeps the choice before v0.3.2: Tailcat always, lan
+	// unless NoLAN, relay when Relays are given. Routes replaces NoLAN and TailcatOnly: set one or the other.
+	Routes []string
 	// Authorize, when set, decides every connection from a known phone before the app sees it: an error
 	// closes it (an encrypted session gets bye "denied"). It runs for every route; on an opaque relay,
 	// which carries no phone identity, phone is "" (deny it unless the app's own layer decides). Since
@@ -117,6 +124,7 @@ type Host struct {
 	relays            []Relay
 	listen            []string
 	autoLANOn         bool
+	tailcat           bool // Tailcat is one of the host's routes
 	authorize         func(phone, route string) error
 	audit             func(Event)
 	auditMu           sync.Mutex
@@ -150,9 +158,14 @@ func New(cfg Config) (*Host, error) {
 	h := &Host{name: connectinvite.CleanName(cfg.Name), port: cfg.Port, pairingPort: cfg.PairingPort, save: cfg.Save,
 		derpMapURL: cfg.DERPMapURL, start: realStart, listener: newChanListener(), pairings: map[*Pairing]struct{}{}, linger: map[*Pairing]struct{}{},
 		conns: map[*Conn]struct{}{}, controlPort: DefaultControlPort, control: newChanListener(), relays: cfg.Relays,
-		listen: cfg.Listen, autoLANOn: !cfg.NoLAN && !cfg.TailcatOnly && len(cfg.Listen) == 0,
-		authorize: cfg.Authorize, audit: cfg.Audit,
+		listen: cfg.Listen, authorize: cfg.Authorize, audit: cfg.Audit,
 		noise: map[key.NodePublic][32]byte{}, windows: map[string]*Pairing{}, sessions: map[*connectsecure.Session]string{}}
+	set, err := routeSet(cfg)
+	if err != nil {
+		return nil, err
+	}
+	h.tailcat = set[RouteTailcat]
+	h.autoLANOn = set[RouteLAN] && len(cfg.Listen) == 0
 	if h.name == "" {
 		hostname, _ := os.Hostname()
 		h.name = connectinvite.CleanName(hostname)
@@ -165,12 +178,6 @@ func New(cfg Config) (*Host, error) {
 	}
 	if h.port == h.pairingPort || h.controlPort == h.port || h.controlPort == h.pairingPort {
 		return nil, errors.New("connecthost: Port, PairingPort and ControlPort must differ")
-	}
-	if cfg.TailcatOnly && (len(cfg.Relays) > 0 || len(cfg.Listen) > 0) {
-		return nil, errors.New("connecthost: TailcatOnly takes no Relays or Listen")
-	}
-	if cfg.NoLAN && len(cfg.Listen) > 0 {
-		return nil, errors.New("connecthost: NoLAN with Listen")
 	}
 	for _, r := range cfg.Relays {
 		if !connectrelay.ValidURL(r.URL) {
@@ -188,7 +195,6 @@ func New(cfg Config) (*Host, error) {
 			return nil, fmt.Errorf("connecthost: Listen %q: give an address phones can dial, not 0.0.0.0 or ::", a)
 		}
 	}
-	var err error
 	if cfg.Identity == "" {
 		h.id = newIdentity()
 	} else if h.id, err = parseIdentity(cfg.Identity); err != nil {
@@ -208,9 +214,67 @@ func New(cfg Config) (*Host, error) {
 		}
 	}
 	h.dirty = h.id.addSecure() && cfg.Identity != ""
+	if !h.tailcat {
+		// Without Tailcat a phone is known only by its Noise key; one the state has no key for (paired
+		// over Tailcat, or saved without State.Keys) can reach the host on no route. Forget it, so it is
+		// told unpaired and pairs again as a new phone.
+		kept := slices.DeleteFunc(slices.Clone(h.allowed), func(k key.NodePublic) bool { _, ok := h.noise[k]; return !ok })
+		if len(kept) != len(h.allowed) {
+			h.allowed, h.dirty = kept, true
+		}
+	}
 	h.reindex()
 	go h.serveControl()
 	return h, nil
+}
+
+// ErrInvalidRoutes: Config's routes contradict each other or leave none (see Config.Routes).
+var ErrInvalidRoutes = errors.New("connecthost: invalid routes")
+
+// routeSet is the routes cfg runs, or why they make no sense.
+func routeSet(cfg Config) (map[string]bool, error) {
+	bad := func(format string, a ...any) (map[string]bool, error) {
+		return nil, fmt.Errorf("%w: "+format, append([]any{ErrInvalidRoutes}, a...)...)
+	}
+	set := map[string]bool{}
+	if cfg.Routes == nil {
+		set[RouteTailcat] = true
+		set[RouteLAN] = !cfg.NoLAN && !cfg.TailcatOnly
+		set[RouteRelay] = len(cfg.Relays) > 0
+		if cfg.TailcatOnly && (len(cfg.Relays) > 0 || len(cfg.Listen) > 0) {
+			return bad("TailcatOnly takes no Relays or Listen")
+		}
+		if cfg.NoLAN && len(cfg.Listen) > 0 {
+			return bad("NoLAN with Listen")
+		}
+		return set, nil
+	}
+	if cfg.TailcatOnly || cfg.NoLAN {
+		return bad("Routes replaces TailcatOnly and NoLAN; set Routes alone")
+	}
+	if len(cfg.Routes) == 0 {
+		return bad("Routes is empty; list at least one of %s, %s, %s", RouteTailcat, RouteLAN, RouteRelay)
+	}
+	for _, r := range cfg.Routes {
+		switch {
+		case r != RouteTailcat && r != RouteLAN && r != RouteRelay:
+			return bad("unknown route %q in Routes; use %s, %s or %s", r, RouteTailcat, RouteLAN, RouteRelay)
+		case set[r]:
+			return bad("route %q is in Routes twice", r)
+		}
+		set[r] = true
+	}
+	switch {
+	case set[RouteRelay] && len(cfg.Relays) == 0:
+		return bad("Routes has %s but Relays is empty", RouteRelay)
+	case !set[RouteRelay] && len(cfg.Relays) > 0:
+		return bad("Relays are given but Routes has no %s", RouteRelay)
+	case !set[RouteLAN] && len(cfg.Listen) > 0:
+		return bad("Listen is given but Routes has no %s", RouteLAN)
+	case !set[RouteTailcat] && cfg.DERPMapURL != "":
+		return bad("DERPMapURL is for Tailcat, which Routes leaves out")
+	}
+	return set, nil
 }
 
 // stateLocked is what Save gets for identity id and phones allowed. h.mu must be held.
@@ -271,7 +335,7 @@ func (h *Host) Start(ctx context.Context) error {
 		return err
 	}
 	h.startAutoLAN()
-	if running || len(allowed) == 0 {
+	if running || len(allowed) == 0 || !h.tailcat {
 		return nil
 	}
 	return h.restartMain(ctx, allowed)
@@ -329,7 +393,7 @@ func (h *Host) restartMain(ctx context.Context, keys []key.NodePublic) error {
 	}
 	h.closeRetired(nil)
 	var next node
-	if len(keys) > 0 {
+	if len(keys) > 0 && h.tailcat {
 		var err error
 		if old != nil {
 			_ = closeNode(old) // the address is the node key's; two live nodes with it would fight
@@ -470,6 +534,9 @@ func (h *Host) addPhone(ctx context.Context, k key.NodePublic, noise *[32]byte) 
 	if known && main != nil {
 		return main.Address(), nil
 	}
+	if known && !h.tailcat {
+		return "", nil // no node to admit it on: the encrypted routes know it by its Noise key
+	}
 	if !known {
 		if len(allowed) >= MaxPhones {
 			undo()
@@ -478,6 +545,7 @@ func (h *Host) addPhone(ctx context.Context, k key.NodePublic, noise *[32]byte) 
 		allowed = append(allowed, k)
 	}
 	if main == nil {
+		// Without Tailcat, restartMain starts no node: it saves the state and the phone is paired.
 		if err := h.restartMain(ctx, allowed); err != nil {
 			undo()
 			return "", err
@@ -502,7 +570,8 @@ func (h *Host) addPhone(ctx context.Context, k key.NodePublic, noise *[32]byte) 
 
 // SetAllowed replaces the paired phones. Removing a phone this way restarts the main node, which
 // drops open connections from every phone; they reconnect on their next dial. To remove one phone
-// and keep the others connected, use Revoke.
+// and keep the others connected, use Revoke. A host without Tailcat keeps only phones whose Noise key
+// it holds: any other could reach it on no route, and pairs again as a new phone.
 func (h *Host) SetAllowed(ctx context.Context, phones []string) error {
 	keys, err := parseKeys(phones)
 	if err != nil {
@@ -512,6 +581,9 @@ func (h *Host) SetAllowed(ctx context.Context, phones []string) error {
 	defer h.op.Unlock()
 	h.mu.Lock()
 	closed := h.closed
+	if !h.tailcat {
+		keys = slices.DeleteFunc(keys, func(k key.NodePublic) bool { _, ok := h.noise[k]; return !ok })
+	}
 	h.mu.Unlock()
 	if closed {
 		return ErrClosed
@@ -584,7 +656,8 @@ func (h *Host) Disconnect(phone string) {
 	closeConns(dropped)
 }
 
-// Address is the main node's Tailcat address, or "" while no phone is paired.
+// Address is the main node's Tailcat address, or "" while no phone is paired or Tailcat is not one
+// of the host's routes.
 func (h *Host) Address() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()

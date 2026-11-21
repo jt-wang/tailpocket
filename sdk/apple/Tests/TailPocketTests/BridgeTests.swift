@@ -38,7 +38,7 @@ final class BridgeTests: XCTestCase {
 
     func testNamesMatchTheContract() {
         XCTAssertEqual(Set(makeBridge().functions.keys), Set(TailPocketBridge.names))
-        XCTAssertEqual(TailPocketBridge.names.count, 22)
+        XCTAssertEqual(TailPocketBridge.names.count, 23)
     }
 
     func testKeysInviteTextAndErrors() async throws {
@@ -106,6 +106,28 @@ final class BridgeTests: XCTestCase {
         }
         XCTAssertFalse(events.items.contains { $0.0 == "tailPocket.pair.emoji" })
         _ = try await bridge.call("tailPocket.setTailcatOnly", ["on": false])
+    }
+
+    // tailPocket.setRoutes reaches the Go side: a relay-only phone has no route in a lan-only invite; null resets.
+    func testSetRoutes() async throws {
+        let bridge = makeBridge()
+        _ = try await bridge.call("tailPocket.setRoutes", ["routes": ["relay"]])
+        defer { try? TailPocket.setRoutes(nil) }
+        let invite: [String: Any] = ["v": 2, "name": "Mac", "exp": 1 << 40, "pk": String(repeating: "A", count: 43), "psk": String(repeating: "A", count: 22),
+                                     "via": [["t": "lan", "a": ["192.168.1.20:7681"]]]]
+        do {
+            _ = try await bridge.call("tailPocket.pair", ["invite": invite, "phoneKey": TailPocket.newKey(), "device": "test", "timeoutMs": 5000])
+            XCTFail("paired")
+        } catch {
+            XCTAssertEqual((error as? TailPocketError)?.code, "unreachable")
+        }
+        _ = try await bridge.call("tailPocket.setRoutes", ["routes": NSNull()])
+        do {
+            _ = try await bridge.call("tailPocket.setRoutes", ["routes": ["wifi"]])
+            XCTFail("accepted wifi")
+        } catch {
+            XCTAssertEqual((error as? TailPocketError)?.code, "invalid-routes")
+        }
     }
 
     // The bridge hands JavaScript the forward's token and a baseUrl under its prefix.

@@ -3,7 +3,7 @@
 // {"error":"<code>"} with a fixed code: invalid-invite, invalid-key, invalid-link, expired,
 // unauthorized, taken, unreachable, revoked, mismatch, handshake-closed, denied, local-failed,
 // cancelled, timeout,
-// unknown-operation, unknown-handle, failed. "revoked" comes only from the host's encrypted bye:
+// unknown-operation, unknown-handle, invalid-routes, failed. "revoked" comes only from the host's encrypted bye:
 // delete the link. Every other code keeps it. Blocking calls (Pair, Pair2, Pair2Finish, LocalPairStart, LocalPairFinish) must run off the main thread;
 // pass a caller-chosen op number to cancel them with Cancel(op).
 package connectmobile
@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -170,7 +171,7 @@ func Pair(op int64, inviteJSON, phoneKey, device, derpMapURL string, timeoutMs i
 		return fail("failed")
 	}
 	defer end(op)
-	link, err := connectphone.Pair(ctx, inv, phoneKey, connectphone.Options{Device: device, DERPMapURL: derpMapURL})
+	link, err := connectphone.Pair(ctx, inv, phoneKey, connectphone.Options{Device: device, DERPMapURL: derpMapURL, Routes: routesPref()})
 	if err != nil {
 		return fail(code(err))
 	}
@@ -198,13 +199,14 @@ func Pair2(op int64, inviteJSON, phoneKey, device, derpMapURL string, timeoutMs 
 	if inv.Expired(time.Now()) {
 		return fail("expired")
 	}
+	only, routes := prefs()
 	ctx, o, ok := begin(op, timeoutOf(timeoutMs)+time.Minute) // the computer's user may take a minute
 	if !ok {
 		return fail("failed")
 	}
 	go func() {
 		link, err := connectphone.PairV2(ctx, inv, phoneKey, connectphone.Options{Device: device, DERPMapURL: derpMapURL,
-			TailcatOnly: tailcatOnly.Load(), OnSAS: func(e []string) {
+			TailcatOnly: only, Routes: routes, OnSAS: func(e []string) {
 				body, _ := json.Marshal(map[string][]string{"emoji": e})
 				o.code <- string(body)
 			}})
@@ -237,7 +239,56 @@ var tailcatOnly atomic.Bool
 // SetTailcatOnly is the phone's preference to reach computers over Tailcat only: Pair2, Connect and
 // Sync then never use the relay or local network routes a computer lists. Set it before Connect;
 // handles already open keep the setting they started with.
-func SetTailcatOnly(on bool) { tailcatOnly.Store(on) }
+// Turning it on clears SetRoutes: the last of the two calls decides.
+func SetTailcatOnly(on bool) {
+	prefMu.Lock()
+	defer prefMu.Unlock()
+	if on {
+		phoneRoutes.Store(nil)
+	}
+	tailcatOnly.Store(on)
+}
+
+var (
+	phoneRoutes atomic.Pointer[[]string]
+	prefMu      sync.Mutex // SetRoutes and SetTailcatOnly change both settings together
+)
+
+func routesPref() []string {
+	if p := phoneRoutes.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// prefs reads TailcatOnly and the routes together, so a concurrent SetRoutes or SetTailcatOnly never
+// yields both at once.
+func prefs() (bool, []string) {
+	prefMu.Lock()
+	defer prefMu.Unlock()
+	return tailcatOnly.Load(), routesPref()
+}
+
+// SetRoutes is the route types the phone may use, comma-separated: any of "tailcat", "lan", "relay"
+// (v0.3.2). Without tailcat, Pair, Pair2 and Connect never start a Tailcat client, so the phone talks
+// to no Tailcat or DERP server. "" allows every route again. It returns "" or {"error":"invalid-routes"}
+// (empty item, unknown or repeated route). It turns SetTailcatOnly off: the last of the two calls
+// decides. Set it before Connect; handles already open keep the setting they started with.
+func SetRoutes(routes string) string {
+	prefMu.Lock()
+	defer prefMu.Unlock()
+	if routes == "" {
+		phoneRoutes.Store(nil)
+		return ""
+	}
+	list := strings.Split(routes, ",")
+	if (connectphone.Options{Routes: list}).Validate() != nil {
+		return fail("invalid-routes")
+	}
+	tailcatOnly.Store(false)
+	phoneRoutes.Store(&list)
+	return ""
+}
 
 // LocalPairStart connects to a host found over Bonjour ("ip:port") and returns {"code":"123456"}
 // for the phone to show. Then call LocalPairFinish(op, …) for the invite.
@@ -312,7 +363,8 @@ func Connect(linkJSON, derpMapURL string) string {
 	if err != nil {
 		return fail("invalid-link")
 	}
-	s, err := connectphone.Connect(link, connectphone.Options{DERPMapURL: derpMapURL, TailcatOnly: tailcatOnly.Load()})
+	only, routes := prefs()
+	s, err := connectphone.Connect(link, connectphone.Options{DERPMapURL: derpMapURL, TailcatOnly: only, Routes: routes})
 	if err != nil {
 		return fail("invalid-link")
 	}

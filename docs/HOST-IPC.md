@@ -25,7 +25,8 @@ since v0.3.0-pre.4 the `lan` route is on by default, see `listen`):
 ```json
 {"keys":{"nodekey:…":"<Noise key>"},
  "relays":[{"url":"wss://relay.example.com","token":"<relay token>","opaque":false,"appAuth":false}],
- "listen":["192.168.1.20:7681"],"noLan":false,"tailcatOnly":false,"authorize":true,"audit":true}
+ "listen":["192.168.1.20:7681"],"noLan":false,"tailcatOnly":false,"routes":["tailcat","lan","relay"],
+ "authorize":true,"audit":true}
 ```
 
 - `keys`: `state.keys` from the last `save`. Without it, phones paired over the encrypted routes have
@@ -45,6 +46,14 @@ since v0.3.0-pre.4 the `lan` route is on by default, see `listen`):
 - `tailcatOnly` (v0.3.0-pre.4): the host as before v0.3: Tailcat only. It opens no local network
   listener, registers with no relay, and v2 invites and `status` routes list only Tailcat. Together with `relays` or
   `listen` it is `invalid-config`.
+- `routes` (v0.3.2): exactly the routes to run, a non-empty list of `"tailcat"`, `"lan"`, `"relay"`.
+  Leave it out for the behaviour above. Without `"tailcat"` the helper starts no Tailcat node and
+  contacts no Tailcat or DERP server: `ready` and `status` have `address` `""`, only `emoji` windows
+  exist (a `pair` without `emoji` fails with `emoji-required`), and `invite2` lists only `lan` and
+  `relay`. `"relay"` needs `relays`, `relays` needs `"relay"`, `listen` needs `"lan"`, `derpMapUrl`
+  needs `"tailcat"`, and `routes` does not go with `tailcatOnly` or `noLan`; each of these is
+  `invalid-config` with a `message` saying which. Examples: LAN only `{"routes":["lan"]}`; your own
+  relay only `{"routes":["relay"],"relays":[{"url":"wss://relay.example.com","token":"…"}]}`.
 - `authorize`: every connection from a known phone waits for your `authorized` answer (5 s, then
   denied).
 - `audit`: `audit` events for pairings, revokes, sessions and refusals.
@@ -122,10 +131,11 @@ from the moment its event goes out, so a `confirm` sent right after it counts; w
 
 Error codes. At start: `invalid-config`, `unsupported-version`, `invalid-forward`,
 `invalid-identity`, `invalid-allowed`, `start-failed` (these end the process); a bad `relays` or
-`listen` entry, an opaque relay without `appAuth`, `tailcatOnly` with `relays` or `listen`, and `noLan`
-with `listen` are `invalid-config`. For a command:
+`listen` entry, an opaque relay without `appAuth`, `tailcatOnly` with `relays` or `listen`, `noLan`
+with `listen`, and a contradictory `routes` are `invalid-config` (route errors add `message`). For a command:
 `invalid-command`, `unknown-command`, `duplicate-id`, `unknown-pairing`, `pair-failed`,
-`invalid-qr-prefix`, `local-unavailable`, `local-not-approved`, `local-too-many-attempts` (the
+`invalid-qr-prefix`, `emoji-required` (a v1 window on a host without Tailcat), `no-route` (a host
+without Tailcat has no route up yet: no lan address, relay not registered), `local-unavailable`, `local-not-approved`, `local-too-many-attempts` (the
 window answered `MaxAttempts` = 3 phones without an approval and closed: ask the user to start
 again), `local-failed`,
 `nothing-to-confirm`, `invalid-allowed`, `operation-failed`.

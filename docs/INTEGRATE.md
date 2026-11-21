@@ -6,14 +6,14 @@ nothing to clone, no Go or gomobile. To build them yourself, see [BUILD.md](BUIL
 
 ## 0. The packages
 
-`R=https://github.com/jt-wang/tailpocket/releases/download/v0.3.1` below.
+`R=https://github.com/jt-wang/tailpocket/releases/download/v0.3.2` below.
 
 | Side | Get it |
 |---|---|
 | Computer, Node | `npm install $R/tailpocket-node.tgz` (the helper for macOS, Linux and Windows is inside) |
-| Computer, Go | `go get github.com/jt-wang/tailpocket@v0.3.1` |
+| Computer, Go | `go get github.com/jt-wang/tailpocket@v0.3.2` |
 | Computer, any language | the helper `$R/tailpocket-host-<os>-<arch>` (`darwin-arm64`, `darwin-amd64`, `linux-amd64`, `linux-arm64`, `windows-amd64.exe`) |
-| Phone, Swift | Swift package `https://github.com/jt-wang/tailpocket`, from `0.3.1` |
+| Phone, Swift | Swift package `https://github.com/jt-wang/tailpocket`, from `0.3.2` |
 | Phone, Kotlin | unzip `$R/tailpocket-android-m2.zip` into your project and add its `m2` folder as a Maven repository |
 | Phone, React Native | `npm install $R/react-native-tailpocket.tgz` |
 | Phone, NSH | `npm install $R/tailpocket-client.tgz`, and the native adapter from the Swift or Kotlin row |
@@ -51,7 +51,7 @@ under it (`curl <base>/`).
 Pick a Bonjour service type for your app (`_myapp._tcp`, at most 15 characters between `_` and
 `._tcp`) and use the same one on both sides.
 
-**iOS / macOS (Swift):** add the Swift package `https://github.com/jt-wang/tailpocket` (from `0.3.1`; it
+**iOS / macOS (Swift):** add the Swift package `https://github.com/jt-wang/tailpocket` (from `0.3.2`; it
 downloads the prebuilt `TailPocketMobile.xcframework` from the release); depend on `TailPocket`
 and, for the camera scanner and pairing view, `TailPocketUI`. In Info.plist add
 `NSCameraUsageDescription`, `NSLocalNetworkUsageDescription`, and your service under
@@ -62,7 +62,7 @@ Check: `swift test`; with the computer running, `TAILPOCKET_LIVE=1 swift test --
 
 **Android (Kotlin):** unzip `tailpocket-android-m2.zip` into your project, add
 `maven { url = uri("m2") }` (the path to that folder) and depend on
-`io.jingtao.tailpocket:tailpocket:0.3.1` (and `tailpocket-ui` for the Compose
+`io.jingtao.tailpocket:tailpocket:0.3.2` (and `tailpocket-ui` for the Compose
 scanner and `TailPocketPairingScreen`). The libraries declare INTERNET, ACCESS_NETWORK_STATE and CAMERA.
 Set `android:networkSecurityConfig="@xml/tailpocket_network_security_config"` on your
 `<application>` (or add its `127.0.0.1` domain-config to your own config): Android refuses plain
@@ -100,7 +100,7 @@ real host.
 
 ## 4. What v0.3 adds
 
-The packages above are v0.3.1. Everything in sections 1 to 3 applies, with these additions. Moving
+The packages above are v0.3.2. Everything in sections 1 to 3 applies, with these additions. Moving
 from v0.2, read the upgrade notes under v0.3.0 in [CHANGELOG.md](../CHANGELOG.md) first.
 
 ### Defaults: nothing to configure
@@ -119,6 +119,27 @@ accepts nothing there but a Noise handshake (a paired phone, or a phone pairing 
   `TailPocket.setTailcatOnly`, JS/NSH/React Native `tailPocket.setTailcatOnly`, Go
   `connectphone.Options.TailcatOnly`) makes the phone ignore every relay and local network route an
   invite or a computer lists. Offer both switches to users who want Tailcat only.
+
+### Routes you choose; Tailcat is optional (v0.3.2)
+
+`routes` (Go `Config.Routes`) lists exactly the routes the computer runs: any of `tailcat`, `lan`,
+`relay`. Leave it out and nothing changes. Without `tailcat` no Tailcat node starts and nothing
+talks to tailcat.dev or DERP; pairing, emoji, revoke and route upgrades work over the others. Pair
+with `emoji: true` windows (`qr2`); v1 codes need Tailcat.
+
+```json
+{"v":1,"forward":"127.0.0.1:7681","routes":["lan"]}
+{"v":1,"forward":"127.0.0.1:7681","routes":["relay"],"relays":[{"url":"wss://relay.example.com","token":"…"}]}
+{"v":1,"forward":"127.0.0.1:7681","routes":["lan","relay"],"relays":[{"url":"wss://relay.example.com","token":"…"}]}
+```
+
+On the phone, `setRoutes(["lan","relay"])` (Swift `try TailPocket.setRoutes`, Kotlin
+`TailPocket.setRoutes`, JS `tailPocket.setRoutes`, Go `connectphone.Options.Routes`) keeps it off
+Tailcat too: it starts no Tailcat client even when the computer lists one. `null` allows every route.
+An empty, unknown or repeated route, or `routes` combined with `tailcatOnly`/`noLan`, is refused
+(`invalid-config` with a `message` on the computer, `invalid-routes` on the phone). On the phone,
+`setRoutes` and `setTailcatOnly(true)` replace each other: the last call decides. Save `keys` with
+the state: a computer without Tailcat forgets a phone whose key it lost, and that phone pairs again.
 
 ### State: save `keys`
 

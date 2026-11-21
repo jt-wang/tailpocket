@@ -29,15 +29,56 @@ Code, `~/.claude/skills/`).
 
 ## What you get
 
-Both ends are small [Tailcat](https://github.com/tailscale/tailcat) nodes: WireGuard-encrypted,
-peer to peer when the networks allow it, relayed otherwise. Your app keeps its own protocol: the
-phone gets a `http://127.0.0.1:PORT` (or a raw stream) that ends at the port you chose on the
-computer, so your existing HTTP, WebSocket or gRPC code works unchanged. On the same Wi-Fi the phone
-can also find the computer over Bonjour and pair after the person checks a 6-digit code, with no
-camera.
+Your app keeps its own protocol: the phone gets a `http://127.0.0.1:PORT` (or a raw stream) that
+ends at the port you chose on the computer, so your existing HTTP, WebSocket or gRPC code works
+unchanged. Under it, TailPocket picks among the routes you allow:
+
+| Route | What it is | Encryption | Needs |
+|---|---|---|---|
+| `lan` | Direct TCP to the computer on the same Wi-Fi or Ethernet. On by default, private addresses only | Noise (end to end) | nothing |
+| `tailcat` | A [Tailcat](https://github.com/tailscale/tailcat) node: WireGuard, peer to peer when the networks allow, through Tailcat's DERP relays otherwise | WireGuard | nothing (uses tailcat.dev) |
+| `relay` | A [tailpocket-relay](cmd/tailpocket-relay/README.md) you run on a server you own | Noise (end to end; the relay sees ciphertext) | your relay |
+
+- **Routes are interchangeable and Tailcat is optional.** Run any non-empty set: all three, LAN
+  only, your relay only, LAN and relay, or Tailcat only. Without Tailcat nothing talks to tailcat.dev
+  or a DERP server, on either side. The phone uses the best route that answers and moves to `lan`
+  when it can, without cutting open connections.
+- **Pairing with emoji.** The computer shows a QR code (or the phone finds it on the same Wi-Fi);
+  both screens show the same four emoji and the person confirms on the computer. The code carries
+  only the routes the computer runs, and the phone pins the computer's key from it.
+- **Revoke** a phone on the computer: its open connections close and every route refuses it, with
+  an encrypted message telling the phone to pair again.
+- Your app can approve each connection (`authorize`) and get an audit log of pairings, revokes and
+  refusals.
 
 TailPocket is an independent open-source project built on Tailscale's Tailcat. Tailscale does not
 make or support it.
+
+### Choose the routes
+
+The computer (Node; the same field is `routes` in the `tailpocket-host` helper and `Config.Routes` in Go):
+
+```js
+TailPocketHost.start({ forward, save })                               // default: Tailcat + LAN (+ relay if given)
+TailPocketHost.start({ forward, save, routes: ['lan'] })              // LAN only, no Tailcat
+TailPocketHost.start({ forward, save, routes: ['relay'],              // your own relay only, no Tailcat
+  relays: [{ url: 'wss://relay.example.com', token: process.env.RELAY_TOKEN }] })
+TailPocketHost.start({ forward, save, routes: ['lan', 'relay'], relays: [/* … */] })  // LAN + relay
+TailPocketHost.start({ forward, save, tailcatOnly: true })            // Tailcat only, as in v0.2
+```
+
+The phone (optional; it uses only what the computer offers anyway):
+
+```swift
+try TailPocket.setRoutes(["lan", "relay"])   // Swift. Kotlin: TailPocket.default.setRoutes(listOf("lan", "relay"))
+```
+```ts
+await tailPocket.setRoutes(["lan", "relay"]);  // NSH and React Native; null allows every route
+```
+
+An empty set, an unknown route, `relay` without `relays`, or `routes` together with `tailcatOnly`
+is refused at start with the reason. Without Tailcat, open windows with `emoji: true` (the older
+v1 codes pair over Tailcat). Run your relay with [cmd/tailpocket-relay](cmd/tailpocket-relay/README.md).
 
 | Side | Stack | Package |
 |---|---|---|
@@ -59,17 +100,21 @@ You need Node 20 or newer. Everything else comes ready-built from the release.
 
 ```sh
 mkdir tailpocket-try && cd tailpocket-try
-R=https://github.com/jt-wang/tailpocket/releases/download/v0.3.1
+R=https://github.com/jt-wang/tailpocket/releases/download/v0.3.2
 npm install $R/tailpocket-node.tgz
 curl -fsSLO https://raw.githubusercontent.com/jt-wang/tailpocket/main/examples/node-host/server.mjs
 node server.mjs                                    # prints "QR tailpocket1:…", a one-time pairing code
 ```
 
+To try it with no Tailcat at all, over the local network only, start it as
+`TAILPOCKET_ROUTES=lan TAILPOCKET_AUTO_APPROVE=1 node server.mjs` (it prints `QR2 tailpocket2:…`),
+and pair below with `./phone pair -routes lan …`.
+
 In a second terminal in the same folder, play the phone (on a Mac with Apple silicon; the release has
 `tailpocket-phone` for Intel Macs, Linux and Windows too):
 
 ```sh
-curl -fsSLo phone https://github.com/jt-wang/tailpocket/releases/download/v0.3.1/tailpocket-phone-darwin-arm64 && chmod +x phone
+curl -fsSLo phone https://github.com/jt-wang/tailpocket/releases/download/v0.3.2/tailpocket-phone-darwin-arm64 && chmod +x phone
 pbpaste | ./phone pair -key phone.key -out link.json -   # copy the tailpocket1:… text first
 ./phone connect -link link.json                         # prints "listening 127.0.0.1:PORT base BASE token …"
 curl BASE/hello.txt                                     # BASE is http://127.0.0.1:PORT/_tailpocket/<token>; "hello from the computer"
@@ -158,20 +203,20 @@ built-in Go Bonjour responder on macOS (macOS's own `dns-sd` is used there).
 
 ## How it works, and what it trusts
 
-1. The computer runs a main Tailcat node that admits only the phones it has paired.
-2. Opening a pairing window starts a second, short-lived node that admits exactly one key: a fresh
-   key inside the QR code, together with a random proof. The QR code is the secret; it expires
-   after the window (default 2 minutes, at most 15).
-3. The phone uses that key to reach the pairing node and sends its own long-term public key.
-   The computer adds it to the main node's allowlist and replies with the main node's address and
-   your `payload`.
-4. From then on the phone connects to the main node with its own key. Removing it from the
-   allowlist (`revoke`) cuts it off.
+1. The computer keeps a Noise key that phones pin, and runs the routes you chose: a listener on its
+   private addresses (`lan`), a registration with your tailpocket-relay (`relay`), and a Tailcat
+   node that admits only paired phones (`tailcat`).
+2. Opening a pairing window makes a one-time code. The QR code carries it, the computer's public
+   key and the routes. It expires with the window (default 2 minutes, at most 15).
+3. The phone runs a Noise handshake over any route in the code, keyed with the one-time code and
+   the pinned key. Both sides derive four emoji from the handshake; the computer's user confirms
+   they match, so someone who saw the code cannot pair in the phone's place unnoticed.
+4. From then on the phone connects with its own key over whichever route answers. `revoke` removes
+   it: the computer closes its connections and tells it, encrypted, that it is no longer paired.
 
-Same-Wi-Fi pairing hands the same invite over the local network instead of through the camera:
-an X25519 exchange, a 6-digit code both screens show, and the invite sealed with
-ChaCha20-Poly1305. Relays only see encrypted WireGuard packets. Tailcat's default relays are free
-and rate-limited; set `derpMapUrl` to use your own.
+`lan` and `relay` are encrypted end to end with Noise (the relay sees only ciphertext); `tailcat` is
+WireGuard through Tailcat's free, rate-limited relays (set `derpMapUrl` for your own). Phones paired
+with v0.2 keep working over Tailcat.
 
 Details: [docs/PROTOCOL.md](docs/PROTOCOL.md) (pairing and wire formats),
 [docs/HOST-IPC.md](docs/HOST-IPC.md) (the helper's JSON lines),

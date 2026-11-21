@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/tailscale/tailcat"
@@ -21,6 +22,7 @@ import (
 	"github.com/jt-wang/tailpocket/connectlocal"
 	"github.com/jt-wang/tailpocket/connectmdns"
 	"github.com/jt-wang/tailpocket/internal/closing"
+	"github.com/jt-wang/tailpocket/internal/testhook"
 )
 
 var (
@@ -119,6 +121,54 @@ type Options struct {
 	// TailcatOnly keeps the phone on Tailcat: it never dials the relay or local network routes a host
 	// lists, and stores none (Link.Via stays empty).
 	TailcatOnly bool
+	// Routes, when set, is the route types the phone may use: one or more of connectinvite.RouteTailcat,
+	// RouteLAN and RouteRelay (v0.3.2). Without RouteTailcat the phone creates no Tailcat client, so
+	// it talks to no Tailcat or DERP server, even when the host lists Tailcat. Nil allows every route.
+	// Set Routes or TailcatOnly, not both.
+	Routes []string
+}
+
+// ErrInvalidRoutes: Options.Routes is empty, lists an unknown or repeated route, or comes with TailcatOnly.
+var ErrInvalidRoutes = errors.New("connectphone: invalid routes")
+
+// Validate checks Routes (ErrInvalidRoutes). Connect, Pair and PairV2 run it.
+func (o Options) Validate() error {
+	if o.Routes == nil {
+		return nil
+	}
+	bad := func(format string, a ...any) error {
+		return fmt.Errorf("%w: "+format, append([]any{ErrInvalidRoutes}, a...)...)
+	}
+	if o.TailcatOnly {
+		return bad("set Routes or TailcatOnly, not both")
+	}
+	if len(o.Routes) == 0 {
+		return bad("Routes is empty; list at least one of tailcat, lan, relay")
+	}
+	seen := map[string]bool{}
+	for _, r := range o.Routes {
+		if r != connectinvite.RouteTailcat && r != connectinvite.RouteLAN && r != connectinvite.RouteRelay {
+			return bad("unknown route %q; use tailcat, lan or relay", r)
+		}
+		if seen[r] {
+			return bad("route %q twice", r)
+		}
+		seen[r] = true
+	}
+	return nil
+}
+
+// allows reports whether the phone may use routes of type t.
+func (o Options) allows(t string) bool {
+	if o.TailcatOnly {
+		return t == connectinvite.RouteTailcat
+	}
+	return o.Routes == nil || slices.Contains(o.Routes, t)
+}
+
+func newClient(server string, k key.NodePrivate, derpMapURL string) *tailcat.Client {
+	testhook.TailcatStarts.Add(1)
+	return &tailcat.Client{Server: tailcat.Addr(server), Key: k, Logf: func(string, ...any) {}, DERPMapURL: derpMapURL}
 }
 
 type reply struct {
@@ -161,9 +211,15 @@ func Pair(ctx context.Context, inv connectinvite.Invite, phoneKey string, opts O
 	if inv.Expired(time.Now()) {
 		return Link{}, ErrExpired
 	}
+	if err := opts.Validate(); err != nil {
+		return Link{}, err
+	}
+	if !opts.allows(connectinvite.RouteTailcat) {
+		return Link{}, fmt.Errorf("%w: a v1 invite pairs over Tailcat, which Options.Routes leaves out", ErrUnreachable)
+	}
 	var oneTime key.NodePrivate
 	_ = oneTime.UnmarshalText([]byte(inv.Key))
-	client := &tailcat.Client{Server: tailcat.Addr(inv.Address), Key: oneTime, Logf: func(string, ...any) {}, DERPMapURL: opts.DERPMapURL}
+	client := newClient(inv.Address, oneTime, opts.DERPMapURL)
 	defer closing.Within(client.Close)
 	port := uint16(inv.Port)
 	httpClient := &http.Client{Transport: &http.Transport{DisableKeepAlives: true,

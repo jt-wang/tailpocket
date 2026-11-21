@@ -56,6 +56,14 @@ test("a refusal after the emoji rejects with unauthorized and stops listening", 
   assert.equal(f.listeners.get("tailPocket.pair.emoji")?.size, 0);
 });
 
+test("setRoutes goes to the bridge", async () => {
+  const f = fake({ "tailPocket.setRoutes": null });
+  const tp = createTailPocket(f.transport);
+  await tp.setRoutes(["lan", "relay"]);
+  await tp.setRoutes(null);
+  assert.deepEqual(f.calls.map((c) => c.args), [{ routes: ["lan", "relay"] }, { routes: null }]);
+});
+
 test("setTailcatOnly goes to the bridge", async () => {
   const f = fake({ "tailPocket.setTailcatOnly": null });
   await createTailPocket(f.transport).setTailcatOnly(true);
@@ -130,7 +138,7 @@ test("the names it calls are the bridge's names", async () => {
   const t: TailPocketTransport = { async call(n) { names.add(n); return n === "tailPocket.local.begin" ? { op: 1, code: "1" } : n === "tailPocket.connect" ? { handle: 1, port: 1, baseUrl: "" } : null; }, on: () => () => {} };
   const tailPocket = createTailPocket(t);
   await tailPocket.newKey(); await tailPocket.publicKey("k"); await tailPocket.inviteText("t"); await tailPocket.decodeInvite("t"); await tailPocket.pair("t", { device: "d" });
-  await tailPocket.decodeInvite2("t"); await tailPocket.setTailcatOnly(false);
+  await tailPocket.decodeInvite2("t"); await tailPocket.setTailcatOnly(false); await tailPocket.setRoutes(null);
   const conn = await tailPocket.connect(); await conn.sync(); await conn.path(); await conn.link(); await conn.close();
   await (await tailPocket.nearby("s", () => {}))(); const p = await tailPocket.pairNearby({ name: "n" }); await p.finish(); await p.cancel();
   await tailPocket.scan(); await tailPocket.store.phoneKey(); await tailPocket.store.saveLink(link); await tailPocket.store.link(); await tailPocket.store.deleteLink();

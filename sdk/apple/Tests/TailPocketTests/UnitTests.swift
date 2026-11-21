@@ -88,6 +88,23 @@ final class UnitTests: XCTestCase {
         }
     }
 
+    // A relay-only phone finds nothing it may use in an invite with only a lan route; bad lists throw.
+    func testSetRoutes() async throws {
+        try TailPocket.setRoutes(["relay"])
+        defer { try? TailPocket.setRoutes(nil) }
+        let invite = TailPocketInvite2(v: 2, name: "Mac", exp: 1 << 40, pk: String(repeating: "A", count: 43), psk: String(repeating: "A", count: 22),
+                                       via: [TailPocketRoute(t: "lan", a: ["192.168.1.20:7681"])])
+        do {
+            _ = try await TailPocket.pair(invite, phoneKey: TailPocket.newKey(), device: "test", timeout: 5) { _ in XCTFail("emoji without a route") }
+            XCTFail("paired")
+        } catch {
+            XCTAssertEqual(error as? TailPocketError, TailPocketError(code: "unreachable"))
+        }
+        for bad in [[], [""], ["lan,relay"], ["wifi"], ["lan", "lan"]] as [[String]] {
+            XCTAssertThrowsError(try TailPocket.setRoutes(bad)) { XCTAssertEqual($0 as? TailPocketError, TailPocketError(code: "invalid-routes")) }
+        }
+    }
+
     func testScannedTextFilter() {
         XCTAssertEqual(TailPocket.inviteText(in: "  tailpocket1:abc \n", prefix: "tailpocket1:"), "tailpocket1:abc")
         XCTAssertEqual(TailPocket.inviteText(in: "myapp://pair?c=tailpocket1:abc", prefix: "tailpocket1:"), "tailpocket1:abc")

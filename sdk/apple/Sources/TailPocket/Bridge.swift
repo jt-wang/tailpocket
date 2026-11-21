@@ -33,7 +33,7 @@ public final class TailPocketBridge: @unchecked Sendable {
         "tailPocket.pair", "tailPocket.connect", "tailPocket.disconnect", "tailPocket.sync", "tailPocket.path", "tailPocket.link",
         "tailPocket.nearby.start", "tailPocket.nearby.stop", "tailPocket.local.begin", "tailPocket.local.finish", "tailPocket.local.cancel", "tailPocket.scan",
         "tailPocket.store.phoneKey", "tailPocket.store.saveLink", "tailPocket.store.link", "tailPocket.store.deleteLink",
-        "tailPocket.setTailcatOnly",
+        "tailPocket.setTailcatOnly", "tailPocket.setRoutes",
     ]
 
     private let store: any TailPocketLinkStore
@@ -96,6 +96,17 @@ public final class TailPocketBridge: @unchecked Sendable {
         },
         "tailPocket.setTailcatOnly": { a in
             TailPocket.setTailcatOnly(Self.dict(a)["on"] as? Bool == true)
+            return nil
+        },
+        "tailPocket.setRoutes": { a in
+            let routes = Self.dict(a)["routes"]
+            if routes == nil || routes is NSNull {
+                try TailPocket.setRoutes(nil)
+            } else if let list = routes as? [String] {
+                try TailPocket.setRoutes(list)
+            } else {
+                throw TailPocketError(code: "invalid-arguments")
+            }
             return nil
         },
         "tailPocket.connect": { [unowned self] a in

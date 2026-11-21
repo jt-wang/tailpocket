@@ -146,6 +146,20 @@ Pairings from v0.2 keep working. On the real network, a Tailcat-only computer an
 listening TCP socket and connect over TCP only to port 443 of tailcat.dev and its DERP nodes
 (`TestAuditTailcatOnlyOpensNothingElse`, `TestTailcatOnlyPhone`, `TestTailcatOnlyAndNoLANConfig`).
 
+## 6a. Without Tailcat (v0.3.2)
+
+A host whose `routes` leave out `tailcat` starts no Tailcat node, and a phone whose `routes` leave it
+out creates no Tailcat client, so neither side contacts tailcat.dev, a DERP server or a Tailcat peer,
+and neither writes Tailcat state. Pairing keeps its emoji check and the host's pinned Noise key over
+`lan` and `relay`; revoke, Authorize and Audit work the same. Tested: every subset of routes pairs,
+connects, revokes and closes with no Tailcat node (`TestRouteSubsets`, `TestUpgradeWithoutTailcat`,
+`TestRoutesPhone`); LAN-only, relay-only and LAN+relay runs create no Tailcat server or client, no
+file or directory named tailcat under a fresh HOME, and (Linux) no socket beyond loopback
+(`TestNoTailcatLANOnly`, `TestNoTailcatRelayOnly`, `TestNoTailcatLANAndRelay`). From outside the
+process, `scripts/e2e-no-tailcat.sh` counts with iptables every packet the test user sends off
+loopback: 0 for the three runs, against 317 for a control run over Tailcat. Invalid sets are refused
+at start (`TestRoutesConfig`, `TestConfigErrorsAreOneFixedLine`).
+
 ## 7. Push notifications
 
 See [PUSH.md](PUSH.md); the gateway (`cmd/tailpocket-push`) is code only, not deployed.

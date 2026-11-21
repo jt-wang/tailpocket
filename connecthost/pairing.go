@@ -144,24 +144,29 @@ func (h *Host) Pair(ctx context.Context, opts PairOptions) (*Pairing, error) {
 	if err != nil {
 		return nil, err
 	}
-	var n node
-	n, err = h.start(ctx, nodeSpec{key: key.NewNode(), psk: tailcat.NewPresharedKey(), region: region,
-		allowed: []key.NodePublic{client.Public()}, port: h.pairingPort, derpMapURL: h.derpMapURL,
-		onTCP: func(port uint16) func(netConn) {
-			if port != h.pairingPort {
-				return nil
-			}
-			return p.servePairingConn
-		}})
-	if err != nil {
-		return nil, err
-	}
-	p.node = n
-	p.inv = connectinvite.Invite{Version: connectinvite.Version, Address: n.Address(), Port: int(h.pairingPort), Key: string(clientText),
-		Proof: connectinvite.NewProof(), ExpiresAt: expires.Unix(), Name: h.name}
-	if err := p.inv.Validate(); err != nil {
-		_ = closeNode(n)
-		return nil, err
+	if !h.tailcat {
+		// No Tailcat window: phones pair over the relay and lan routes of the v2 invite only.
+		p.inv = connectinvite.Invite{ExpiresAt: expires.Unix(), Name: h.name}
+	} else {
+		var n node
+		n, err = h.start(ctx, nodeSpec{key: key.NewNode(), psk: tailcat.NewPresharedKey(), region: region,
+			allowed: []key.NodePublic{client.Public()}, port: h.pairingPort, derpMapURL: h.derpMapURL,
+			onTCP: func(port uint16) func(netConn) {
+				if port != h.pairingPort {
+					return nil
+				}
+				return p.servePairingConn
+			}})
+		if err != nil {
+			return nil, err
+		}
+		p.node = n
+		p.inv = connectinvite.Invite{Version: connectinvite.Version, Address: n.Address(), Port: int(h.pairingPort), Key: string(clientText),
+			Proof: connectinvite.NewProof(), ExpiresAt: expires.Unix(), Name: h.name}
+		if err := p.inv.Validate(); err != nil {
+			_ = closeNode(n)
+			return nil, err
+		}
 	}
 	p.server = &http.Server{Handler: p, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = p.server.Serve(p.ln) }()
@@ -179,7 +184,10 @@ func (h *Host) Pair(ctx context.Context, opts PairOptions) (*Pairing, error) {
 // Noise key and the pairing code. A phone may pair over any of them; they all redeem this window.
 func (p *Pairing) InviteV2() connectinvite.V2 {
 	v1 := p.inv
-	via := []connectinvite.Route{{T: connectinvite.RouteTailcat, Inv: &v1}}
+	var via []connectinvite.Route
+	if p.node != nil {
+		via = append(via, connectinvite.Route{T: connectinvite.RouteTailcat, Inv: &v1})
+	}
 	h := p.h
 	h.mu.Lock()
 	pk := h.id.noisePublic()
@@ -203,13 +211,22 @@ var ErrNoConfirm = errors.New("connecthost: v2 invites need PairOptions.Confirm"
 
 // Invite is the v1 invite, for apps before v0.3; holding it lets a phone pair until it expires.
 // Handing it out (Invite, QR, ServeLocal) opens /pair on the Tailcat window, which shows no emoji.
+// A host without Tailcat has no v1 invite: Invite returns one that fails Validate, QR and ServeLocal
+// return ErrNoTailcat.
 func (p *Pairing) Invite() connectinvite.Invite { p.openV1(); return p.inv }
 
 // QR is the v1 invite as text for a QR code or link, e.g. with connectinvite.DefaultPrefix.
 func (p *Pairing) QR(prefix string) (string, error) {
+	if p.node == nil {
+		return "", ErrNoTailcat
+	}
 	p.openV1()
 	return connectinvite.Encode(p.inv, prefix)
 }
+
+// ErrNoTailcat: a v1 invite (QR, ServeLocal) was asked of a host whose routes leave Tailcat out.
+// v1 invites pair over Tailcat only; use QR2.
+var ErrNoTailcat = errors.New("connecthost: Tailcat is not one of this host's routes; v1 invites need it, use QR2")
 
 func (p *Pairing) openV1() {
 	p.mu.Lock()
@@ -385,7 +402,7 @@ func (p *Pairing) join(ctx context.Context, k key.NodePublic, device, route stri
 			}
 		}
 		address, err := p.h.addPhone(ctx, k, noise)
-		if err != nil || address == "" {
+		if err != nil || (address == "" && p.h.tailcat) { // without Tailcat there is no address
 			return nil, http.StatusServiceUnavailable
 		}
 		p.bound, p.phone, p.noise = phone.Key, phone, noise

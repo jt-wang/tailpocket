@@ -78,6 +78,14 @@ class TailPocketBridge(
             toValue(TailPocketHostLink.serializer(), link)
         },
         "tailPocket.setTailcatOnly" to { a -> sdk.setTailcatOnly(a["on"] == true); null },
+        "tailPocket.setRoutes" to { a ->
+            val routes = when (val r = a["routes"]) {
+                null -> null
+                is List<*> -> r.map { it as? String ?: throw TailPocketException("invalid-arguments") }
+                else -> throw TailPocketException("invalid-arguments")
+            }
+            sdk.setRoutes(routes); null
+        },
         "tailPocket.connect" to { a ->
             var slot: String? = null
             val link = when (val l = a["link"]) {
@@ -165,7 +173,7 @@ class TailPocketBridge(
             "tailPocket.pair", "tailPocket.connect", "tailPocket.disconnect", "tailPocket.sync", "tailPocket.path", "tailPocket.link",
             "tailPocket.nearby.start", "tailPocket.nearby.stop", "tailPocket.local.begin", "tailPocket.local.finish", "tailPocket.local.cancel", "tailPocket.scan",
             "tailPocket.store.phoneKey", "tailPocket.store.saveLink", "tailPocket.store.link", "tailPocket.store.deleteLink",
-            "tailPocket.setTailcatOnly",
+            "tailPocket.setTailcatOnly", "tailPocket.setRoutes",
         )
 
         /** A bridge with the Keystore store and NsdManager discovery. */

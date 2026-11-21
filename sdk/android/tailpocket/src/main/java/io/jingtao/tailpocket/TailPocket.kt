@@ -221,6 +221,17 @@ class TailPocket private constructor(private val native: TailPocketNative) {
      */
     fun setTailcatOnly(on: Boolean) = native.setTailcatOnly(on)
 
+    /**
+     * The route types the phone may use: any of `"tailcat"`, `"lan"`, `"relay"` (v0.3.2). Without `"tailcat"`, [pair] and
+     * [connect] never start a Tailcat client, so the phone talks to no Tailcat or DERP server. `null` allows every route.
+     * Throws [TailPocketException] `invalid-routes` for an empty, unknown or repeated route. It turns [setTailcatOnly] off, and setTailcatOnly(true) clears it: the last call decides.
+     * Set it before [connect]; open connections keep theirs.
+     */
+    fun setRoutes(routes: List<String>?) {
+        if (routes != null && (routes.isEmpty() || routes.any { it.isEmpty() || it.contains(',') })) throw TailPocketException("invalid-routes")
+        failure(native.setRoutes(routes?.joinToString(",") ?: ""))?.let { throw TailPocketException(it) }
+    }
+
     /** Opens a local route to the computer. Nothing goes over the network until a client connects. */
     fun connect(link: TailPocketHostLink, derpMapUrl: String = ""): TailPocketConnection {
         val out = native.connect(link.encode(), derpMapUrl)

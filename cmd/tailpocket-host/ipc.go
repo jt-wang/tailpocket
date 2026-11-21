@@ -43,6 +43,8 @@ type config struct {
 	// v0.3.0-pre.4: Tailcat only (no lan listener, no relay), or no lan route.
 	TailcatOnly bool `json:"tailcatOnly"`
 	NoLAN       bool `json:"noLan"`
+	// v0.3.2: exactly the routes to run, any of "tailcat", "lan", "relay" (connecthost.Config.Routes).
+	Routes []string `json:"routes"`
 }
 
 type relay struct {
@@ -145,7 +147,7 @@ func Run(parent context.Context, in io.Reader, out io.Writer) error {
 	r.ctx = ctx
 	hc := connecthost.Config{Name: r.cfg.Name, Port: r.cfg.Port, PairingPort: r.cfg.PairingPort, Identity: r.cfg.Identity,
 		Allowed: r.cfg.Allowed, Keys: r.cfg.Keys, DERPMapURL: r.cfg.DERPMapURL, Save: r.save, Listen: r.cfg.Listen,
-		TailcatOnly: r.cfg.TailcatOnly, NoLAN: r.cfg.NoLAN}
+		TailcatOnly: r.cfg.TailcatOnly, NoLAN: r.cfg.NoLAN, Routes: r.cfg.Routes}
 	for _, rl := range r.cfg.Relays {
 		hc.Relays = append(hc.Relays, connecthost.Relay{URL: rl.URL, Token: rl.Token, Opaque: rl.Opaque, AppAuth: rl.AppAuth})
 	}
@@ -168,6 +170,10 @@ func Run(parent context.Context, in io.Reader, out io.Writer) error {
 		return fail("invalid-identity")
 	case errors.Is(err, connecthost.ErrInvalidPhone):
 		return fail("invalid-allowed")
+	case errors.Is(err, connecthost.ErrInvalidRoutes):
+		// Same code as before v0.3.2 for tailcatOnly or noLan contradictions; message says which.
+		r.emit(map[string]any{"event": "error", "code": "invalid-config", "message": err.Error()})
+		return err
 	case err != nil:
 		return fail("invalid-config")
 	}
@@ -423,6 +429,11 @@ func (r *runtime) pair(c command, fail func(string)) {
 			prefix2 = connectinvite.DefaultPrefix2
 		}
 		qr2, err := p.QR2(prefix2)
+		if errors.Is(err, connectinvite.ErrInvalid) && len(p.InviteV2().Via) == 0 {
+			p.Close()
+			fail("no-route") // no route is up yet (no lan address, no relay registered): try again
+			return
+		}
 		if err != nil {
 			p.Close()
 			fail("invalid-qr-prefix")
@@ -431,6 +442,11 @@ func (r *runtime) pair(c command, fail func(string)) {
 		ev["qr2"], ev["invite2"] = qr2, p.InviteV2()
 	} else {
 		qr, err := p.QR(prefix)
+		if errors.Is(err, connecthost.ErrNoTailcat) {
+			p.Close()
+			fail("emoji-required") // without Tailcat, only v2 windows ({"emoji":true}) exist
+			return
+		}
 		if err != nil {
 			p.Close()
 			fail("invalid-qr-prefix")

@@ -39,7 +39,7 @@ import (
 )
 
 // Version is the library version the phone sends in its encrypted hello.
-const Version = "0.3.1"
+const Version = "0.3.2"
 
 // ErrRevoked: the host said, encrypted, that this phone is no longer paired. Pair again.
 var ErrRevoked = errors.New("connectphone: the host no longer has this phone paired")
@@ -124,6 +124,9 @@ func Connect(link Link, opts Options) (*Session, error) {
 	if err := link.validate(); err != nil {
 		return nil, err
 	}
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
 	private, _ := parsePrivate(link.Key)
 	s := &Session{link: link, opts: opts, private: private}
 	s.setClientLocked()
@@ -131,9 +134,8 @@ func Connect(link Link, opts Options) (*Session, error) {
 }
 
 func (s *Session) setClientLocked() {
-	if s.client == nil && s.link.Address != "" {
-		s.client = &tailcat.Client{Server: tailcat.Addr(s.link.Address), Key: s.private,
-			Logf: func(string, ...any) {}, DERPMapURL: s.opts.DERPMapURL}
+	if s.client == nil && s.link.Address != "" && s.opts.allows(connectinvite.RouteTailcat) {
+		s.client = newClient(s.link.Address, s.private, s.opts.DERPMapURL)
 	}
 }
 
@@ -158,12 +160,12 @@ func routeKey(r connectinvite.Route) string {
 // attemptsLocked lists what Dial tries, in order.
 func (s *Session) attemptsLocked() []connectinvite.Route {
 	var all []connectinvite.Route
-	if s.link.Address != "" {
+	if s.client != nil {
 		all = append(all, connectinvite.Route{T: connectinvite.RouteTailcat})
 	}
 	for _, r := range s.link.Via {
-		if s.opts.TailcatOnly {
-			break // the phone's preference: the routes the host lists stay unused
+		if !s.opts.allows(r.T) {
+			continue // the phone's preference: the routes the host lists stay unused
 		}
 		switch {
 		case r.T == connectinvite.RouteRelay && r.M == connectinvite.ModeOpaque:
@@ -616,6 +618,11 @@ func (s *Session) Sync(ctx context.Context) (Link, error) {
 		return link, nil // nothing to register: the phone uses no route the key is for
 	}
 	if client == nil {
+		if link.HostKey != "" {
+			// No Tailcat (the host's routes or Options.Routes leave it out): the key was registered at
+			// pairing, and new routes come on every encrypted session.
+			return link, nil
+		}
 		return Link{}, errors.New("connectphone: this link has no Tailcat route")
 	}
 	httpClient := &http.Client{Transport: &http.Transport{DisableKeepAlives: true,
@@ -694,6 +701,9 @@ func PairV2(ctx context.Context, inv connectinvite.V2, phoneKey string, opts Opt
 	if inv.Expired(time.Now()) {
 		return Link{}, ErrExpired
 	}
+	if err := opts.Validate(); err != nil {
+		return Link{}, err
+	}
 	if inv.PK == "" {
 		// A v1 code read as v2 (one Tailcat route, no Noise key): pair the v1 way, as v0.2 did. A host
 		// that wants the emoji check hands out v2 codes, which always name its key.
@@ -712,7 +722,10 @@ func PairV2(ctx context.Context, inv connectinvite.V2, phoneKey string, opts Opt
 	var list []connectinvite.Route
 	for _, r := range inv.Via {
 		tailcatOK := r.T == connectinvite.RouteTailcat && r.Inv != nil && r.Inv.Validate() == nil
-		if tailcatOK || (!opts.TailcatOnly && (r.T == connectinvite.RouteLAN || (r.T == connectinvite.RouteRelay && r.M != connectinvite.ModeOpaque))) {
+		if !opts.allows(r.T) {
+			continue
+		}
+		if tailcatOK || r.T == connectinvite.RouteLAN || (r.T == connectinvite.RouteRelay && r.M != connectinvite.ModeOpaque) {
 			list = append(list, r)
 		}
 	}
@@ -783,7 +796,7 @@ func pairOnce(ctx context.Context, r connectinvite.Route, cfg connectsecure.Clie
 		if oneTime.UnmarshalText([]byte(r.Inv.Key)) != nil {
 			return Link{}, errors.New("connectphone: invalid invite")
 		}
-		client := &tailcat.Client{Server: tailcat.Addr(r.Inv.Address), Key: oneTime, Logf: func(string, ...any) {}, DERPMapURL: opts.DERPMapURL}
+		client := newClient(r.Inv.Address, oneTime, opts.DERPMapURL)
 		defer closing.Within(client.Close)
 		raw, err = client.DialTCPPort(ctx, uint16(r.Inv.Port))
 	} else {

@@ -186,6 +186,28 @@ listener at all, no relay connection, and invites and `routes` list only Tailcat
 -tailcat-only`) never dials the relay or lan routes a host lists, stores none and does not sync a
 key. Phones paired with v0.2 keep working unchanged against either.
 
+**Route sets (v0.3.2).** `Config.Routes` (helper `routes`, Node `routes`) names exactly the routes a
+host runs, any non-empty subset of `tailcat`, `lan` and `relay`; unset, the host behaves as above.
+Without `tailcat` the host starts no Tailcat node, main or pairing window, and so contacts no Tailcat
+control (tailcat.dev) or DERP server: a v2 invite lists only `lan` and `relay` routes, `Address` is
+`""`, v1 invites (`Invite`, `QR`, `ServeLocal`, helper `pair` without `emoji`) are refused
+(`ErrNoTailcat`, helper `emoji-required`) and the control port has nothing to listen on. Pairing,
+the emoji, the pinned Noise key, `routes` messages, revoke (bye `unpaired`), upgrade (`lan` before
+`relay`) and close work as with Tailcat. A host without Tailcat forgets, at `New`, every allowed phone it has
+no Noise key for (paired over Tailcat, or state saved without `keys`): no sync can bring the key back,
+so such a phone is told `unpaired` and pairs again as a new phone; `SetAllowed` likewise keeps
+only phones whose key it holds. `New` refuses an
+empty set, an unknown or repeated name, `relay` without `Relays`, `Relays` without `relay`, `Listen`
+without `lan`, `DERPMapURL` without `tailcat`, and `Routes` together with `TailcatOnly` or `NoLAN`
+(`ErrInvalidRoutes`, with the reason in the message; the helper's `invalid-config` carries it in
+`message`).
+
+A phone's `Options.Routes` (mobile `SetRoutes("lan,relay")`, Swift/Kotlin `setRoutes([...])`,
+JS `tailPocket.setRoutes`, `tailpocket-phone -routes lan,relay`) limits the route types it may use;
+without `tailcat` it creates no Tailcat client even for a link or invite that lists Tailcat, and a v1
+invite fails with `unreachable`. `Sync` on a link without a Tailcat client returns the link: its key
+was registered when it paired, and routes come on every encrypted session.
+
 ## Keys
 
 The host's identity (`State.Identity`, JSON `{v:1,key,psk,region,noise,relay}`) gains two keys in

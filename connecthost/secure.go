@@ -38,7 +38,7 @@ const (
 )
 
 // Version is the library version the host sends in its encrypted hello.
-const Version = "0.3.1"
+const Version = "0.3.2"
 
 // maxSessionsPerPhone: a fifth session from one phone closes its oldest with bye busy.
 const maxSessionsPerPhone = 4

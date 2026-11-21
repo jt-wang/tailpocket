@@ -249,6 +249,18 @@ public enum TailPocket {
     /// use the relay or local network routes a computer lists. Set it before `connect`; open connections keep theirs.
     public static func setTailcatOnly(_ on: Bool) { ConnectmobileSetTailcatOnly(on) }
 
+    /// The route types the phone may use: any of `"tailcat"`, `"lan"`, `"relay"` (v0.3.2). Without `"tailcat"`, `pair`
+    /// and `connect` never start a Tailcat client, so the phone talks to no Tailcat or DERP server. `nil` allows every
+    /// route. Throws `TailPocketError` `invalid-routes` for an empty, unknown or repeated route. It turns `setTailcatOnly`
+    /// off, and `setTailcatOnly(true)` clears it: the last call decides. Set it before `connect`; open connections keep theirs.
+    public static func setRoutes(_ routes: [String]?) throws {
+        if let routes, routes.isEmpty || routes.contains(where: { $0.isEmpty || $0.contains(",") }) {
+            throw TailPocketError(code: "invalid-routes")
+        }
+        let out = ConnectmobileSetRoutes(routes?.joined(separator: ",") ?? "")
+        if !out.isEmpty { throw TailPocketError(code: "invalid-routes") }
+    }
+
     /// Joins the computer's pairing window and returns the TailPocketHostLink to store. Cancelling the task cancels it.
     public static func pair(_ invite: TailPocketInvite, phoneKey: String, device: String, derpMapURL: String = "",
                             timeout: TimeInterval = 90) async throws -> TailPocketHostLink {

@@ -4,6 +4,7 @@
 //   TAILPOCKET_SERVICE=_myapp._tcp node …                 # also lets phones on this Wi-Fi find it
 //   TAILPOCKET_RELAY_URL=wss://relay.example.com TAILPOCKET_RELAY_TOKEN=… node …   # also over your tailpocket-relay
 //   TAILPOCKET_EMOJI=1 node …                             # a v0.3 code (every route) with the emoji check
+//   TAILPOCKET_ROUTES=lan node …                          # only these routes (tailcat, lan, relay); no Tailcat at all
 //
 // TailPocketHostState (identity + paired phones) is kept in ./host-state.json; delete it to forget all phones.
 import { createServer } from 'node:http';
@@ -28,13 +29,14 @@ const connectHost = await TailPocketHost.start({
   identity: state.identity,
   allowed: state.allowed,
   keys: state.keys,
+  routes: process.env.TAILPOCKET_ROUTES?.split(','),
   relays: process.env.TAILPOCKET_RELAY_URL ? [{ url: process.env.TAILPOCKET_RELAY_URL, token: process.env.TAILPOCKET_RELAY_TOKEN ?? '' }] : undefined,
   save: (next) => writeFileSync(stateFile, JSON.stringify(next), { mode: 0o600 }),
 });
 
 // TAILPOCKET_EMOJI=1 (or a relay) opens a v0.3 window: one code for every route, and the user compares the four
 // emoji the phone shows with the ones printed here. Without it, a v0.2-style Tailcat code.
-const emoji = process.env.TAILPOCKET_EMOJI === '1' || !!process.env.TAILPOCKET_RELAY_URL;
+const emoji = process.env.TAILPOCKET_EMOJI === '1' || !!process.env.TAILPOCKET_RELAY_URL || !!process.env.TAILPOCKET_ROUTES;
 let ask;
 const yes = async (question) => process.env.TAILPOCKET_AUTO_APPROVE === '1'
   || /^y/i.test(await (ask ??= createInterface({ input: process.stdin, output: process.stderr })).question(question));

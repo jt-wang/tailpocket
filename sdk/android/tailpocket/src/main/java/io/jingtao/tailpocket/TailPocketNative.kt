@@ -19,6 +19,8 @@ interface TailPocketNative {
     // v0.3.0-pre.4: pair2 returns {"emoji":[…]} first; pair2Finish waits for the computer's answer.
     fun pair2Finish(op: Long, timeoutMs: Long): String
     fun setTailcatOnly(on: Boolean)
+    // v0.3.2: comma-separated route types, "" for all; returns "" or {"error":"invalid-routes"}.
+    fun setRoutes(routes: String): String
     fun sync(handle: Long, timeoutMs: Long): String
     fun link(handle: Long): String
     fun path(handle: Long, timeoutMs: Long): String
@@ -40,6 +42,7 @@ internal object GoNative : TailPocketNative {
         Connectmobile.pair2(op, invite, key, device, derp, timeoutMs)
     override fun pair2Finish(op: Long, timeoutMs: Long): String = Connectmobile.pair2Finish(op, timeoutMs)
     override fun setTailcatOnly(on: Boolean) = Connectmobile.setTailcatOnly(on)
+    override fun setRoutes(routes: String): String = Connectmobile.setRoutes(routes)
     override fun sync(handle: Long, timeoutMs: Long): String = Connectmobile.sync(handle, timeoutMs)
     override fun link(handle: Long): String = Connectmobile.link(handle)
     override fun path(handle: Long, timeoutMs: Long): String = Connectmobile.path(handle, timeoutMs)

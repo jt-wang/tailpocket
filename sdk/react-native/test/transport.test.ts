@@ -58,6 +58,8 @@ test("the pairing emoji arrive through the emoji event while pair waits", async 
   assert.deepEqual(shown, [["🐶", "🌙", "🍕", "🔑"]]);
   await tailPocket.setTailcatOnly(true);
   assert.deepEqual(n.calls.at(-1), ["tailPocket.setTailcatOnly", { on: true }]);
+  await tailPocket.setRoutes(["relay"]);
+  assert.deepEqual(n.calls.at(-1), ["tailPocket.setRoutes", { routes: ["relay"] }]);
 });
 
 // RCTEventEmitter on iOS drops events missing from supportedEvents(): it must list every event the bridges emit.

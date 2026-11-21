@@ -40,8 +40,9 @@ const usage = `usage:
   tailpocket-phone connect -link FILE
   tailpocket-phone dial -link FILE
   tailpocket-phone sync -link FILE
-Every command takes -tailcat-only (never the relay or local network routes), -derp-map-url URL and,
-for tests on one machine, -loopback-lan.
+Every command takes -tailcat-only (never the relay or local network routes) or -routes lan,relay (only
+these route types; without tailcat no Tailcat client starts), -derp-map-url URL and, for tests on one
+machine, -loopback-lan.
 `
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -64,13 +65,18 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	linkFile := fs.String("link", "", "link file")
 	derp := fs.String("derp-map-url", "", "own relay map")
 	tailcatOnly := fs.Bool("tailcat-only", false, "use Tailcat only, never the relay or local network routes")
+	routes := fs.String("routes", "", "comma-separated route types to use: tailcat, lan, relay")
 	loopbackLAN := fs.Bool("loopback-lan", false, "testing: accept lan routes to loopback addresses")
 	bad := func(msg string) int { fmt.Fprintf(stderr, "%s\n%s", msg, usage); return 2 }
 	if err := fs.Parse(args[1:]); err != nil {
 		return bad(err.Error())
 	}
 	testhook.LoopbackRoutes = *loopbackLAN
-	opts := connectphone.Options{Device: *device, DERPMapURL: *derp, TailcatOnly: *tailcatOnly,
+	var routeList []string
+	if *routes != "" {
+		routeList = strings.Split(*routes, ",")
+	}
+	opts := connectphone.Options{Device: *device, DERPMapURL: *derp, TailcatOnly: *tailcatOnly, Routes: routeList,
 		OnSAS: func(e []string) {
 			fmt.Fprintf(stderr, "emoji: %s (check that the computer shows the same, then confirm there)\n", strings.Join(e, " "))
 		}}

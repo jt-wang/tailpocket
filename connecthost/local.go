@@ -43,6 +43,9 @@ func (p *Pairing) ServeLocal(ctx context.Context, opts LocalOptions) error {
 	if opts.Confirm == nil {
 		return errors.New("connecthost: LocalOptions.Confirm is required")
 	}
+	if p.node == nil {
+		return ErrNoTailcat
+	}
 	label := opts.Label
 	if label == "" {
 		label = connectlocal.DefaultLabel

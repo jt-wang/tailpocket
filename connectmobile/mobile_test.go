@@ -133,3 +133,43 @@ func TestV2CallsReportCodes(t *testing.T) {
 		t.Fatalf("v1 as v2: %s", DecodeInvite2(qr, ""))
 	}
 }
+
+// SetRoutes (v0.3.2): a lan-only phone refuses a v1 invite, which pairs over Tailcat only; bad
+// lists are an error code; "" allows every route again.
+func TestSetRoutes(t *testing.T) {
+	defer SetRoutes("")
+	for _, bad := range []string{"wifi", "lan,lan", "lan,", ","} {
+		if got := SetRoutes(bad); got != `{"error":"invalid-routes"}` {
+			t.Errorf("SetRoutes(%q) = %q", bad, got)
+		}
+	}
+	if got := SetRoutes("lan,relay"); got != "" {
+		t.Fatalf("SetRoutes(lan,relay) = %q", got)
+	}
+	inv := connectinvite.Invite{Version: connectinvite.Version, Address: testAddress(t), Port: 48932, Key: NewKey(),
+		Proof: connectinvite.NewProof(), ExpiresAt: time.Now().Add(time.Minute).Unix(), Name: "Mac"}
+	body, _ := json.Marshal(inv)
+	if got := Pair(1, string(body), NewKey(), "p", "", 2000); got != `{"error":"unreachable"}` {
+		t.Fatalf("v1 Pair with lan,relay: %s", got)
+	}
+	if SetRoutes("") != "" || routesPref() != nil {
+		t.Fatal("SetRoutes(\"\") did not reset")
+	}
+}
+
+// SetRoutes and SetTailcatOnly replace each other, so a valid link never turns invalid-link.
+func TestSetRoutesAndTailcatOnlyReplaceEachOther(t *testing.T) {
+	defer SetRoutes("")
+	defer SetTailcatOnly(false)
+	link := `{"address":"` + testAddress(t) + `","port":48931,"name":"Mac","key":"` + NewKey() + `"}`
+	for _, order := range []func(){func() { SetRoutes("lan,relay"); SetTailcatOnly(true) }, func() { SetTailcatOnly(true); SetRoutes("lan") }} {
+		order()
+		out := Connect(link, "")
+		if strings.Contains(out, "error") {
+			t.Fatalf("Connect: %s", out)
+		}
+		var h struct{ Handle int64 }
+		_ = json.Unmarshal([]byte(out), &h)
+		Stop(h.Handle)
+	}
+}

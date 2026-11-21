@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/jt-wang/tailpocket/internal/closing"
+	"github.com/jt-wang/tailpocket/internal/testhook"
 	"github.com/tailscale/tailcat"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
@@ -52,6 +53,7 @@ func realStart(ctx context.Context, s nodeSpec) (node, error) {
 	if len(s.allowed) == 0 {
 		return nil, errors.New("connecthost: refusing to start a node that admits every client")
 	}
+	testhook.TailcatStarts.Add(1)
 	server := &tailcat.Server{
 		Key:            s.key,
 		PresharedKey:   s.psk,

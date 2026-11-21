@@ -37,6 +37,8 @@ class BridgeTest {
         override fun pair2Finish(op: Long, timeoutMs: Long) = """{"name":"Mac","payload":"t","key":"privkey:stored","pk":"PK2"}"""
         var tailcatOnly: Boolean? = null
         override fun setTailcatOnly(on: Boolean) { tailcatOnly = on }
+        var routes: String? = null
+        override fun setRoutes(routes: String): String { this.routes = routes; return "" }
         override fun sync(handle: Long, timeoutMs: Long) = """{"address":"tcM","port":48931,"name":"Mac","key":"privkey:1","pk":"PK","via":[{"t":"relay","u":"wss://relay.example.com","r":"R"}]}"""
         override fun link(handle: Long) = sync(handle, 0)
         override fun path(handle: Long, timeoutMs: Long) = if (handle == 4L) """{"route":"relay","relay":"relay.example.com"}""" else """{"error":"revoked"}"""
@@ -104,6 +106,13 @@ class BridgeTest {
         assertEquals(true, native.tailcatOnly)
         call("tailPocket.setTailcatOnly", mapOf("on" to false))
         assertEquals(false, native.tailcatOnly)
+    }
+
+    @Test fun setRoutes() = runTest {
+        call("tailPocket.setRoutes", mapOf("routes" to listOf("relay")))
+        assertEquals("relay", native.routes)
+        call("tailPocket.setRoutes", mapOf("routes" to null))
+        assertEquals("", native.routes)
     }
 
     @Test fun connectAndDisconnect() = runTest {

@@ -166,3 +166,12 @@ test('pre.4 config: tailcatOnly, noLan, and appAuth with an opaque relay', async
   assert.equal((await opaque.host.status()).routes[0].m, 'opaque');
   await opaque.host.close();
 });
+
+test('v0.3.2 routes: a set without Tailcat, and bad sets rejected with the reason', async () => {
+  const relayOnly = await start({ routes: ['relay'], relays: [{ url: 'wss://relay.example.com', token: 't' }] });
+  assert.deepEqual((await relayOnly.host.status()).routes.map((r) => r.t), ['relay']);
+  await relayOnly.host.close();
+  for (const bad of [{ routes: [] }, { routes: ['relay'] }, { routes: ['lan'], tailcatOnly: true }]) {
+    await assert.rejects(start(bad), (e) => e.code === 'invalid-config' && /invalid routes/.test(e.message));
+  }
+});

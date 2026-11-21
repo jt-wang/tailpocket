@@ -39,6 +39,11 @@ class TailPocketTest {
         override fun pair2Finish(op: Long, timeoutMs: Long): String { finished += op to timeoutMs; return finishResult }
         var tailcatOnly: Boolean? = null
         override fun setTailcatOnly(on: Boolean) { tailcatOnly = on }
+        var routes: String? = null
+        override fun setRoutes(routes: String): String {
+            if (routes.split(",").any { it !in setOf("tailcat", "lan", "relay") } && routes != "") return """{"error":"invalid-routes"}"""
+            this.routes = routes; return ""
+        }
         override fun sync(handle: Long, timeoutMs: Long) = """{"address":"tcM","port":48931,"name":"Mac","key":"privkey:1","pk":"PK","via":[{"t":"relay","u":"wss://relay.example.com","r":"R"}]}"""
         override fun link(handle: Long) = sync(handle, 0)
         override fun path(handle: Long, timeoutMs: Long) = if (handle == 4L) """{"route":"relay","relay":"relay.example.com"}""" else """{"error":"revoked"}"""
@@ -123,6 +128,18 @@ class TailPocketTest {
         val native = FakeNative()
         TailPocket.with(native).setTailcatOnly(true)
         assertEquals(true, native.tailcatOnly)
+    }
+
+    @Test fun setRoutesReachesTheNativeLayer() {
+        val native = FakeNative()
+        val tc = TailPocket.with(native)
+        tc.setRoutes(listOf("lan", "relay"))
+        assertEquals("lan,relay", native.routes)
+        tc.setRoutes(null)
+        assertEquals("", native.routes)
+        for (bad in listOf(emptyList(), listOf(""), listOf("lan,relay"), listOf("wifi"))) {
+            try { tc.setRoutes(bad); fail("accepted $bad") } catch (e: TailPocketException) { assertEquals("invalid-routes", e.code) }
+        }
     }
 
     @Test fun connectGivesALocalUrl() {

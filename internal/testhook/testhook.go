@@ -10,3 +10,7 @@ var LoopbackRoutes bool
 // NoUpgrade keeps a phone's session on the route that worked (no connectphone Session.upgrade), so a
 // test can hold it on the relay.
 var NoUpgrade atomic.Bool
+
+// TailcatStarts counts every Tailcat server and client this module creates, host and phone side, so
+// a test can show a configuration without Tailcat creates none.
+var TailcatStarts atomic.Int64

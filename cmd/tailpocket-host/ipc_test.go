@@ -42,6 +42,9 @@ func TestConfigErrorsAreOneFixedLine(t *testing.T) {
 		`{"v":1,"forward":"127.0.0.1:8080","tailcatOnly":true,"relays":[{"url":"wss://r.example","token":"t"}]}` + "\n": "invalid-config",
 		`{"v":1,"forward":"127.0.0.1:8080","tailcatOnly":true,"listen":["192.168.1.20:7681"]}` + "\n":                   "invalid-config",
 		`{"v":1,"forward":"127.0.0.1:8080","relays":[{"url":"wss://r.example","token":"t","opaque":true}]}` + "\n":      "invalid-config",
+		`{"v":1,"forward":"127.0.0.1:8080","routes":[]}` + "\n":                                                         "invalid-config",
+		`{"v":1,"forward":"127.0.0.1:8080","routes":["relay"]}` + "\n":                                                  "invalid-config",
+		`{"v":1,"forward":"127.0.0.1:8080","routes":["lan"],"tailcatOnly":true}` + "\n":                                 "invalid-config",
 	}
 	for config, code := range cases {
 		out, err := runWith(t, config)
@@ -259,7 +262,8 @@ func TestRelayStatusWithoutPhones(t *testing.T) {
 	defer w.Close()
 	send := func(v any) { b, _ := json.Marshal(v); _, _ = w.Write(append(b, '\n')) }
 	ev := answering(events(r), send, func(string) bool { return true }, &sync.Map{})
-	send(map[string]any{"v": 1, "forward": "127.0.0.1:9", "relays": []any{map[string]any{"url": url, "token": "relay-token"}}})
+	// noLan: on a machine with a private address the default lan route would be listed too.
+	send(map[string]any{"v": 1, "forward": "127.0.0.1:9", "noLan": true, "relays": []any{map[string]any{"url": url, "token": "relay-token"}}})
 	ev.next(t, "ready")
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
 		send(map[string]any{"cmd": "status", "id": "st"})
@@ -378,5 +382,49 @@ func TestLiveHelperRelay(t *testing.T) {
 		if _, ok := audits.Load(k); !ok {
 			t.Errorf("no %s audit event", k)
 		}
+	}
+}
+
+// routes (v0.3.2): a helper with only a relay starts no Tailcat. Its status and invite list only the
+// relay, a v1 window is refused with emoji-required, and a bad set says why in the error message.
+func TestRoutesWithoutTailcat(t *testing.T) {
+	out, _ := runWith(t, `{"v":1,"forward":"127.0.0.1:8080","routes":[]}`+"\n")
+	if !strings.Contains(out, "Routes is empty") {
+		t.Fatalf("empty routes: %s", out)
+	}
+	url := startRelay(t)
+	in, w := io.Pipe()
+	r, o := io.Pipe()
+	go func() { _ = Run(context.Background(), in, o); o.Close() }()
+	defer w.Close()
+	send := func(v any) { b, _ := json.Marshal(v); _, _ = w.Write(append(b, '\n')) }
+	ev := answering(events(r), send, func(string) bool { return true }, &sync.Map{})
+	send(map[string]any{"v": 1, "forward": "127.0.0.1:9", "routes": []string{"relay"},
+		"relays": []any{map[string]any{"url": url, "token": "relay-token"}}})
+	if e := ev.next(t, "ready"); e["address"] != "" {
+		t.Fatalf("ready %v", e)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		send(map[string]any{"cmd": "status", "id": "st"})
+		st := ev.next(t, "status")
+		if st["relays"].(map[string]any)[url] == "up" {
+			if routes := st["routes"].([]any); len(routes) != 1 || routes[0].(map[string]any)["t"] != "relay" {
+				t.Fatalf("routes %v", routes)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status %v", st)
+		}
+	}
+	send(map[string]any{"cmd": "pair", "id": "v1"})
+	if e := ev.next(t, "error"); e["code"] != "emoji-required" || e["id"] != "v1" {
+		t.Fatalf("v1 window without Tailcat: %v", e)
+	}
+	send(map[string]any{"cmd": "pair", "id": "v2", "emoji": true})
+	e := ev.next(t, "pairing")
+	via := e["invite2"].(map[string]any)["via"].([]any)
+	if len(via) != 1 || via[0].(map[string]any)["t"] != "relay" {
+		t.Fatalf("invite routes %v", via)
 	}
 }
