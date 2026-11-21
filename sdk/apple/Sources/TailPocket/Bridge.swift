@@ -99,8 +99,10 @@ public final class TailPocketBridge: @unchecked Sendable {
             return nil
         },
         "tailPocket.setRoutes": { a in
-            let routes = Self.dict(a)["routes"]
-            if routes == nil || routes is NSNull {
+            // Only an explicit null allows every route. A call without `routes` is a mistake (JavaScript's
+            // undefined is dropped on the way here), not a choice to widen the phone's routes.
+            guard let routes = Self.dict(a)["routes"] else { throw TailPocketError(code: "invalid-arguments") }
+            if routes is NSNull {
                 try TailPocket.setRoutes(nil)
             } else if let list = routes as? [String] {
                 try TailPocket.setRoutes(list)

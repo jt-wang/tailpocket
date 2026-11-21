@@ -138,7 +138,9 @@ On the phone, `setRoutes(["lan","relay"])` (Swift `try TailPocket.setRoutes`, Ko
 Tailcat too: it starts no Tailcat client even when the computer lists one. `null` allows every route.
 An empty, unknown or repeated route, or `routes` combined with `tailcatOnly`/`noLan`, is refused
 (`invalid-config` with a `message` on the computer, `invalid-routes` on the phone). On the phone,
-`setRoutes` and `setTailcatOnly(true)` replace each other: the last call decides. Save `keys` with
+`setRoutes` (also `setRoutes(null)`) and `setTailcatOnly(true)` replace each other: the last call
+decides. The setting lives in the app's process: call `setRoutes` at every launch before `pair` or
+`connect`, and pass `null` only on purpose (a call without a list is refused). Save `keys` with
 the state: a computer without Tailcat forgets a phone whose key it lost, and that phone pairs again.
 
 ### State: save `keys`

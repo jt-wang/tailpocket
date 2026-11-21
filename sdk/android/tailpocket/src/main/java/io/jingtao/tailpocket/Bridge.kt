@@ -79,6 +79,9 @@ class TailPocketBridge(
         },
         "tailPocket.setTailcatOnly" to { a -> sdk.setTailcatOnly(a["on"] == true); null },
         "tailPocket.setRoutes" to { a ->
+            // Only an explicit null allows every route. A call without `routes` is a mistake (JavaScript's
+            // undefined is dropped on the way here), not a choice to widen the phone's routes.
+            if (!a.containsKey("routes")) throw TailPocketException("invalid-arguments")
             val routes = when (val r = a["routes"]) {
                 null -> null
                 is List<*> -> r.map { it as? String ?: throw TailPocketException("invalid-arguments") }

@@ -272,12 +272,14 @@ func prefs() (bool, []string) {
 // SetRoutes is the route types the phone may use, comma-separated: any of "tailcat", "lan", "relay"
 // (v0.3.2). Without tailcat, Pair, Pair2 and Connect never start a Tailcat client, so the phone talks
 // to no Tailcat or DERP server. "" allows every route again. It returns "" or {"error":"invalid-routes"}
-// (empty item, unknown or repeated route). It turns SetTailcatOnly off: the last of the two calls
-// decides. Set it before Connect; handles already open keep the setting they started with.
+// (empty item, unknown or repeated route), which changes nothing. Every accepted call, "" too, turns
+// SetTailcatOnly off: the last of the two calls decides. Set it before Connect; handles already open
+// keep the setting they started with.
 func SetRoutes(routes string) string {
 	prefMu.Lock()
 	defer prefMu.Unlock()
 	if routes == "" {
+		tailcatOnly.Store(false)
 		phoneRoutes.Store(nil)
 		return ""
 	}

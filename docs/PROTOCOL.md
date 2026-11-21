@@ -206,7 +206,10 @@ A phone's `Options.Routes` (mobile `SetRoutes("lan,relay")`, Swift/Kotlin `setRo
 JS `tailPocket.setRoutes`, `tailpocket-phone -routes lan,relay`) limits the route types it may use;
 without `tailcat` it creates no Tailcat client even for a link or invite that lists Tailcat, and a v1
 invite fails with `unreachable`. `Sync` on a link without a Tailcat client returns the link: its key
-was registered when it paired, and routes come on every encrypted session.
+was registered when it paired, and routes come on every encrypted session. A `routes` message that
+would leave the phone no route it may dial (a host without Tailcat whose lan address is gone for a
+moment sends an empty list) is not taken: the phone keeps the routes it has, so it can come back
+when the address does (`TestAuditV032EmptyRoutesDoNotWipeTheLink`).
 
 ## Keys
 

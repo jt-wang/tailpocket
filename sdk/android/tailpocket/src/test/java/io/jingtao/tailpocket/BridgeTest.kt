@@ -115,6 +115,16 @@ class BridgeTest {
         assertEquals("", native.routes)
     }
 
+    // Audit v0.3.2, finding 3: only an explicit null means "every route". A call without `routes` (JavaScript's
+    // undefined is dropped on the way), with a misspelt key or with something that is no list is refused.
+    @Test fun setRoutesWithoutAListIsRefused() = runTest {
+        call("tailPocket.setRoutes", mapOf("routes" to listOf("relay")))
+        for (bad in listOf<Map<String, Any?>>(emptyMap(), mapOf("route" to listOf("lan")), mapOf("routes" to "lan"), mapOf("routes" to listOf("lan", 5)))) {
+            try { call("tailPocket.setRoutes", bad); fail("accepted $bad") } catch (e: TailPocketException) { assertEquals("invalid-arguments", e.code) }
+        }
+        assertEquals("relay", native.routes)
+    }
+
     @Test fun connectAndDisconnect() = runTest {
         @Suppress("UNCHECKED_CAST")
         val c = call("tailPocket.connect", mapOf("link" to mapOf("address" to "tcM", "port" to 48931, "name" to "Mac", "key" to "privkey:1"))) as Map<String, Any?>

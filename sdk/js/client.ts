@@ -121,7 +121,12 @@ export function createTailPocket(transport: TailPocketTransport) {
     /** The route types the phone may use (v0.3.2): any of "tailcat", "lan", "relay". Without "tailcat", pair and
      *  connect never start a Tailcat client, so the phone talks to no Tailcat or DERP server. `null` allows every
      *  route. Rejects with `invalid-routes` for an empty, unknown or repeated route. It turns setTailcatOnly off, and setTailcatOnly(true) clears it: the last call decides. */
-    setRoutes: (routes: TailPocketRouteType[] | null) => call<void>("tailPocket.setRoutes", { routes }),
+    setRoutes: (routes: TailPocketRouteType[] | null) =>
+      // Only null allows every route: undefined (a setting that did not load) would be dropped on the way to the
+      // native side and must not widen the phone's routes.
+      routes === null || Array.isArray(routes)
+        ? call<void>("tailPocket.setRoutes", { routes })
+        : Promise.reject(new TailPocketError("invalid-routes")),
 
     /** Opens the tunnel to a saved (or given) computer. */
     connect: async (options: { link?: TailPocketHostLink; slot?: string; derpMapUrl?: string } = {}): Promise<TailPocketConnection> => {

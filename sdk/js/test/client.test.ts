@@ -64,6 +64,18 @@ test("setRoutes goes to the bridge", async () => {
   assert.deepEqual(f.calls.map((c) => c.args), [{ routes: ["lan", "relay"] }, { routes: null }]);
 });
 
+// Audit v0.3.2, finding 3: a call without a list (undefined is dropped on the way to the native side, where a
+// missing `routes` reads as null, "every route") must be refused, not widen a phone that was kept off Tailcat.
+test("setRoutes without a list is refused, never sent as every route", async () => {
+  const f = fake({ "tailPocket.setRoutes": null });
+  const tp = createTailPocket(f.transport);
+  for (const bad of [undefined, "lan", {}, 0]) {
+    await assert.rejects((tp.setRoutes as any)(bad), (e: any) => e instanceof TailPocketError && e.code === "invalid-routes", `accepted ${JSON.stringify(bad)}`);
+  }
+  await assert.rejects((tp.setRoutes as any)(), (e: any) => e instanceof TailPocketError && e.code === "invalid-routes");
+  assert.equal(f.calls.length, 0);
+});
+
 test("setTailcatOnly goes to the bridge", async () => {
   const f = fake({ "tailPocket.setTailcatOnly": null });
   await createTailPocket(f.transport).setTailcatOnly(true);

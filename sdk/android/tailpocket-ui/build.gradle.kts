@@ -35,14 +35,14 @@ dependencies {
     implementation(libs.zxing.core)
 }
 
-// ./gradlew publish puts io.jingtao.tailpocket:tailpocket-ui:0.3.2 next to the gomobile library in
+// ./gradlew publish puts io.jingtao.tailpocket:tailpocket-ui:0.3.3 next to the gomobile library in
 // build/android/m2 (React Native's module and any app can depend on it from there).
 publishing {
     publications {
         register<MavenPublication>("release") {
             groupId = "io.jingtao.tailpocket"
             artifactId = "tailpocket-ui"
-            version = "0.3.2"
+            version = "0.3.3"
             afterEvaluate { from(components["release"]) }
         }
     }

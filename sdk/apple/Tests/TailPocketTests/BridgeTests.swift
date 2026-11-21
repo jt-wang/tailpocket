@@ -130,6 +130,23 @@ final class BridgeTests: XCTestCase {
         }
     }
 
+    // Audit v0.3.2, finding 3: only an explicit null means "every route". A call without `routes` (JavaScript's
+    // undefined is dropped on the way), with a misspelt key or with something that is no list of strings is refused.
+    func testSetRoutesWithoutAListIsRefused() async throws {
+        let bridge = makeBridge()
+        _ = try await bridge.call("tailPocket.setRoutes", ["routes": ["relay"]])
+        defer { try? TailPocket.setRoutes(nil) }
+        let bad: [Any?] = [[String: Any](), ["route": ["lan"]], ["routes": "lan"], ["routes": ["lan", 5] as [Any]], nil]
+        for args in bad {
+            do {
+                _ = try await bridge.call("tailPocket.setRoutes", args)
+                XCTFail("accepted \(String(describing: args))")
+            } catch {
+                XCTAssertEqual((error as? TailPocketError)?.code, "invalid-arguments")
+            }
+        }
+    }
+
     // The bridge hands JavaScript the forward's token and a baseUrl under its prefix.
     func testConnectReturnsTheTokenAndItsBaseUrl() async throws {
         let bridge = makeBridge()

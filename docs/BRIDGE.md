@@ -26,7 +26,7 @@ new code on the computer), `unreachable`, `revoked` (the computer removed this p
 | `tailPocket.disconnect` | `handle` | ; a link from the store is saved again if the computer sent new routes |
 | `tailPocket.sync` | `handle`, `timeoutMs?` | the updated `TailPocketHostLink`, saved to its slot: registers the phone's end-to-end key over Tailcat (links from before v0.3) |
 | `tailPocket.path` | `handle`, `timeoutMs?` | `{route, relay}`: `direct`, `relay` or `lan`; since v0.3.1 also `kind` (`lan`, `direct`, `derp`, `relay`), for `derp` `derpRegion`, `derpCode`, `derpHost`, for `relay` `relayHost`; rejects `revoked` once the computer removed the phone |
-| `tailPocket.setRoutes` | `routes` | ; v0.3.2: the route types the phone may use, any of `"tailcat"`, `"lan"`, `"relay"`; `null` for all. Without `"tailcat"` the phone starts no Tailcat client. Rejects `invalid-routes` for an empty, unknown or repeated route. It turns `setTailcatOnly` off, and `setTailcatOnly` true clears it: the last call decides |
+| `tailPocket.setRoutes` | `routes` | ; v0.3.2: the route types the phone may use, any of `"tailcat"`, `"lan"`, `"relay"`; `null` for all. Without `"tailcat"` the phone starts no Tailcat client. Rejects `invalid-routes` for an empty, unknown or repeated route, and `invalid-arguments` for a call without `routes` or with something that is no list of strings: only an explicit `null` allows every route. It turns `setTailcatOnly` off, and `setTailcatOnly` true clears it: the last call decides |
 | `tailPocket.link` | `handle` | the link with the computer's latest routes |
 | `tailPocket.nearby.start` | `service` | then `tailPocket.nearby` events: `{hosts: [{name}]}` |
 | `tailPocket.nearby.stop` | | |

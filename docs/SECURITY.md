@@ -160,6 +160,22 @@ process, `scripts/e2e-no-tailcat.sh` counts with iptables every packet the test 
 loopback: 0 for the three runs, against 317 for a control run over Tailcat. Invalid sets are refused
 at start (`TestRoutesConfig`, `TestConfigErrorsAreOneFixedLine`).
 
+The v0.3.2 audit (v0.3.3) adds, for the three sets without Tailcat: strangers, a claimed
+nodekey, a holder of the whole QR code, a machine posing as the computer, a revoked phone and a
+phone whose key the computer lost get nothing on lan or relay
+(`TestAuditV032NoTailcatOnlyAPairedPhoneGetsIn`, `TestAuditV032RemovalWithoutTailcat`); the emoji on
+every route of all seven sets are `HKDF(h, "tailpocket2 sas")`, and without Tailcat a no or a phone
+that hangs up spends the code and nothing pairs without the emoji
+(`TestAuditV032EmojiIsTheHandshakeSASOnEveryRouteSet`); same-Wi-Fi pairing keeps its 3 commitments
+per window on every set with Tailcat and does not exist without it
+(`TestAuditV032SameWiFiLimitsOnEveryRouteSet`); the phone layer the apps ship (`connectmobile`) and
+the automatic lan route create no Tailcat client or node (`TestNoTailcatAuditMobileLayer`,
+`TestNoTailcatAuditAutoLAN`). Three findings, all fail-closed, are fixed with it: a phone keeps its
+routes when the computer sends none it can use (`TestAuditV032EmptyRoutesDoNotWipeTheLink`),
+`setRoutes(null)` also ends `setTailcatOnly` (`TestAuditV032SetRoutesNullAllowsEveryRouteAgain`), and
+a bridge call without `routes` is refused instead of allowing every route
+(`testSetRoutesWithoutAListIsRefused`, `setRoutesWithoutAListIsRefused`).
+
 ## 7. Push notifications
 
 See [PUSH.md](PUSH.md); the gateway (`cmd/tailpocket-push`) is code only, not deployed.
@@ -212,4 +228,9 @@ See [PUSH.md](PUSH.md); the gateway (`cmd/tailpocket-push`) is code only, not de
   Tailcat treats the phone key as a claim and takes no Noise key with it. Someone holding an invite
   can register another phone's nodekey that way; that phone then cannot pair over a relay or the
   local network until it pairs again over Tailcat and syncs its key. The claimant never gets a
-  session as that phone on any route (`TestReviewTailcatPairingTakesAnyNodekey`).
+  session as that phone on any route (`TestReviewTailcatPairingTakesAnyNodekey`). v0.3.2: this needs
+  Tailcat on the computer and a v1 invite (`Invite`, `QR`, `ServeLocal`, `pair` without `emoji`). A
+  computer without Tailcat has no `/pair`: every pairing there proves its nodekey, so the claim is
+  refused, and such a computer forgets a claimed key when it starts, since it has no Noise key. A
+  phone that leaves Tailcat out of its routes cannot take the way back above; the computer's user
+  revokes the claimed key and the phone pairs as a new one (`TestAuditV032NodekeyClaim`).

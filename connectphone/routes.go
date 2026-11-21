@@ -39,7 +39,7 @@ import (
 )
 
 // Version is the library version the phone sends in its encrypted hello.
-const Version = "0.3.2"
+const Version = "0.3.3"
 
 // ErrRevoked: the host said, encrypted, that this phone is no longer paired. Pair again.
 var ErrRevoked = errors.New("connectphone: the host no longer has this phone paired")
@@ -157,6 +157,30 @@ func routeKey(r connectinvite.Route) string {
 	return r.T + " " + strings.Join(r.A, ",")
 }
 
+// usable reports whether the phone may dial route r of a link that pins hostKey: a type Options
+// allows, and an opaque relay or an encrypted relay or lan route with the host's key. Tailcat is not
+// in Link.Via (Link.Address), and a type this library does not know is never dialed.
+func (o Options) usable(r connectinvite.Route, hostKey string) bool {
+	if !o.allows(r.T) {
+		return false // the phone's preference: the routes the host lists stay unused
+	}
+	switch {
+	case r.T == connectinvite.RouteRelay && r.M == connectinvite.ModeOpaque:
+		return true
+	case r.T == connectinvite.RouteRelay || r.T == connectinvite.RouteLAN:
+		return hostKey != ""
+	}
+	return false
+}
+
+// reachable reports whether l has any route the phone may dial.
+func (o Options) reachable(l Link) bool {
+	if l.Address != "" && o.allows(connectinvite.RouteTailcat) {
+		return true
+	}
+	return slices.ContainsFunc(l.Via, func(r connectinvite.Route) bool { return o.usable(r, l.HostKey) })
+}
+
 // attemptsLocked lists what Dial tries, in order.
 func (s *Session) attemptsLocked() []connectinvite.Route {
 	var all []connectinvite.Route
@@ -164,16 +188,9 @@ func (s *Session) attemptsLocked() []connectinvite.Route {
 		all = append(all, connectinvite.Route{T: connectinvite.RouteTailcat})
 	}
 	for _, r := range s.link.Via {
-		if !s.opts.allows(r.T) {
-			continue // the phone's preference: the routes the host lists stay unused
+		if s.opts.usable(r, s.link.HostKey) {
+			all = append(all, r)
 		}
-		switch {
-		case r.T == connectinvite.RouteRelay && r.M == connectinvite.ModeOpaque:
-		case (r.T == connectinvite.RouteRelay || r.T == connectinvite.RouteLAN) && s.link.HostKey != "":
-		default:
-			continue // a route this library does not know, or an encrypted one without the host's key
-		}
-		all = append(all, r)
 	}
 	for i, r := range all {
 		if routeKey(r) == s.last && i > 0 {
@@ -413,10 +430,22 @@ func (s *Session) watch(sess *connectsecure.Session) {
 				continue
 			}
 			s.mu.Lock()
-			s.link.setRoutes(via)
+			next := s.link
+			next.setRoutes(via)
 			if s.opts.TailcatOnly {
-				s.link.Via = nil
+				next.Via = nil
 			}
+			if !s.opts.reachable(next) && s.opts.reachable(s.link) {
+				// The host has no route for this phone right now: a host without Tailcat whose lan
+				// address is gone, or one left with only route types the phone does not use. Keep the
+				// routes the phone has. With none it could not come back when the address does (nothing
+				// but a route carries the next list), its Link would no longer validate, and it would
+				// have to pair again. A stale route is harmless: every dial runs the Noise handshake with
+				// the pinned host key.
+				s.mu.Unlock()
+				continue
+			}
+			s.link = next
 			s.setClientLocked()
 			link := s.link
 			s.mu.Unlock()
