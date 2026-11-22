@@ -190,9 +190,17 @@ relay, an attacker who resets connections. So:
   reset: open it, or pair again" or "this network may block the connection". The app must never delete
   the link, unpair, or replace or drop the pinned host key because of it. Pairing again stays the user's
   choice; the old link keeps working if the computer comes back.
-- `refused` from the lan route alone counts only when no route went unanswered: on a plane every other
-  route times out while some device refuses the old lan address, and that is `no-answer`
-  (`TestLastFailureReasons`).
+- `refused` or `handshake-closed` from the lan route counts only when no route went unanswered: on a
+  plane every other route times out while some device refuses or closes the old lan address, and that
+  is `no-answer` (`TestLastFailureReasons`; the closed handshake since v0.3.5,
+  `TestAuditV034AnyDeviceCanSayTheComputerWasReset`).
+- Phishing: a device on the same Wi-Fi, or a captive portal, that answers on the computer's lan
+  address can still make the app say "TailPocket isn't running, or the computer was reset: pair again"
+  when the other routes are refused too or there are none. The app limits what that gains: pairing
+  again starts only from the user's own tap, never by itself; the user scans only the code shown on
+  their own computer's screen, since a code from anywhere else pairs the phone with someone else's
+  computer; and the old link is kept until the new pairing succeeds, so a fake message costs nothing
+  if the user ignores it. The emoji check during pairing stays as it is.
 - A computer that was reset cannot be told apart from one not running TailPocket: the automatic lan port
   comes from the computer's Noise key, so a new identity listens on another port, and its relay room
   differs too. Both read as `refused`.

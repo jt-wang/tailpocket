@@ -329,9 +329,16 @@ Since v0.3.4 the phone also keeps, per session, why its last Dial failed (`Sessi
 relay close code 4404, `relay-down` for any other relay refusal, `handshake-closed`, `no-answer` for
 the rest) and one reason for the user: `handshake-closed` or `refused` (a lan refusal only when no
 other route went unanswered) when something answered for the computer, `relay-down`, else `no-answer`.
-A Dial's last route is bounded by 30 s (before, only by the caller), so a network that drops packets
-ends in `no-answer` instead of a Dial that never returns. These are hints for the user, unauthenticated
-(SECURITY.md §6b).
+Since v0.3.5 a lan `handshake-closed` follows the same rule as a lan refusal: it counts only when no
+other route went unanswered, else the reason is `no-answer`. These are hints for the user,
+unauthenticated (SECURITY.md §6b).
+
+How long a failing Dial takes: each route but the last is bounded by 10 s, and the forward
+(`Session.Forward`, which mobile `Connect` uses) bounds a whole Dial by max(20 s, routes × 10 s), as it
+has since v0.3.0. Within that, a lan address that never answers ends after 10 s (the Noise handshake's
+own limit), a Tailcat route to a computer that never answers after 10 s (Tailcat's ping), and a relay
+that never answers when the forward's bound ends (20 s with one route). A direct `Session.Dial` call
+without a deadline has only the caller's context on its last route.
 
 ## The local network: what the lan route protects against
 

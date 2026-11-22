@@ -1,13 +1,17 @@
 #!/bin/sh
 # Builds every file a GitHub release attaches, into dist/release/, so people can use TailPocket without
 # Go, gomobile or a checkout. Needs what the other build scripts need (Go, Xcode, the Android SDK).
-# Two steps, because Package.swift holds the framework zip's checksum and the Go programs record the
-# commit they are built from (vcs.revision):
+# Two steps, because Package.swift holds the framework zip's checksum:
 #   scripts/build-release.sh framework <version>   builds dist/framework/TailPocketMobile.xcframework.zip
-#                                                  and prints its checksum (the framework records no commit)
+#                                                  and prints its checksum
 #   (put that checksum and the vX.Y.Z URL in Package.swift, commit: this is the commit to tag)
-#   scripts/build-release.sh <version>             builds the rest from that commit, with a clean tree, and
-#                                                  checks every Go program records exactly HEAD
+#   scripts/build-release.sh <version>             builds the rest from that commit, with a clean tree
+# The Go programs are built without VCS stamping (scripts/build-host.sh, -buildvcs=false) and with -trimpath,
+# so they depend only on the source files: anyone can rebuild them, and the npm packages that carry them,
+# byte for byte from the public tag, a clone or a source download alike:
+#   scripts/build-release.sh verify <version>      rebuilds those and compares them with the release's SHA256SUMS
+# The Apple framework and the Android libraries are not reproducible this way (gomobile, the C toolchains
+# and Gradle stamp times and paths); their sha256 is in SHA256SUMS and Package.swift.
 # TAILPOCKET_RELEASE_REPO (default jt-wang/tailpocket) is where the release's files are downloaded from.
 set -eu
 cd "$(dirname "$0")/.."
@@ -26,11 +30,32 @@ if [ "${1:-}" = framework ]; then
   echo "next: put it and releases/download/v$version in Package.swift, commit, then scripts/build-release.sh $version"
   exit 0
 fi
+if [ "${1:-}" = verify ]; then
+  version="${2:?$usage}"
+  repo="${TAILPOCKET_RELEASE_REPO:-jt-wang/tailpocket}"
+  rm -rf dist/verify sdk/node/bin build && mkdir -p dist/verify
+  curl -fsSL "https://github.com/$repo/releases/download/v$version/SHA256SUMS" -o dist/verify/SHA256SUMS.release
+  ./scripts/build-host.sh
+  cp sdk/node/bin/tailpocket-host-* build/tailpocket-phone-* build/tailpocket-relay-* dist/verify/
+  (cd sdk/node && npm pack --silent --pack-destination "$OLDPWD/dist/verify") >/dev/null
+  (cd sdk/js && npm pack --silent --pack-destination "$OLDPWD/dist/verify") >/dev/null
+  mv "dist/verify/tailpocket-$version.tgz" dist/verify/tailpocket-node.tgz
+  mv "dist/verify/tailpocket-client-$version.tgz" dist/verify/tailpocket-client.tgz
+  cd dist/verify
+  n=0
+  for f in tailpocket-host-* tailpocket-phone-* tailpocket-relay-* tailpocket-node.tgz tailpocket-client.tgz; do
+    want=$(awk -v f="$f" '$2 == f {print $1}' SHA256SUMS.release)
+    got=$(shasum -a 256 "$f" | awk '{print $1}')
+    if [ "$want" = "$got" ]; then echo "same      $f"; else echo "DIFFERENT $f"; n=$((n + 1)); fi
+  done
+  [ "$n" = 0 ] && echo "every rebuilt file matches v$version" || { echo "$n files differ"; exit 1; }
+  exit 0
+fi
 version="${1:?$usage}"
 
-# The commit the binaries record must be the one that is tagged: nothing left to amend.
+# The release is built from the commit that is tagged: nothing left to amend.
 if [ -n "$(git status --porcelain)" ]; then
-  git status --short; echo "the tree has changes: commit everything first (the binaries record HEAD)"; exit 1
+  git status --short; echo "the tree has changes: commit everything first (this is the commit to tag)"; exit 1
 fi
 [ -f "$fw" ] || { echo "no $fw: run scripts/build-release.sh framework $version first"; exit 1; }
 sum=$(swift package compute-checksum "$fw")
@@ -73,15 +98,14 @@ cp "$fw" "$out/"
 # Android: a Maven repository folder with tailpocket-mobile, tailpocket and tailpocket-ui.
 (cd build/android && ditto -c -k --norsrc --noextattr --noacl --keepParent m2 "$OLDPWD/$out/tailpocket-android-m2.zip")
 
-# Every Go program must record HEAD, unmodified, so the tag alone rebuilds them byte for byte.
+# No Go program may record a commit: then a build from the public tag, whose commit differs from this
+# repository's, gives the same bytes.
 for f in "$out"/tailpocket-host-* "$out"/tailpocket-phone-* "$out"/tailpocket-relay-*; do
-  info=$(go version -m "$f")
-  echo "$info" | grep -q "vcs.revision=$head" && echo "$info" | grep -q "vcs.modified=false" ||
-    { echo "$f does not record $head unmodified"; exit 1; }
+  ! go version -m "$f" | grep -q "vcs\." || { echo "$f records VCS information"; exit 1; }
 done
 [ -z "$(git status --porcelain)" ] || { echo "the build changed tracked files"; exit 1; }
 
 (cd "$out" && shasum -a 256 * > SHA256SUMS)
 echo "Package.swift checksum: $sum"
-echo "binaries record $head: tag this commit"
+echo "built from $head: tag this commit"
 ls -l "$out"

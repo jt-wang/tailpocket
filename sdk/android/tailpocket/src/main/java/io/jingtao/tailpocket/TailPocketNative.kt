@@ -24,7 +24,7 @@ interface TailPocketNative {
     fun sync(handle: Long, timeoutMs: Long): String
     fun link(handle: Long): String
     fun path(handle: Long, timeoutMs: Long): String
-    // v0.3.4: why the handle's last connection attempt failed, {"code","at","route"} or {}.
+    // v0.3.4: why the handle's last connection attempt failed, {"code","reason","route","routes","at"} or {}.
     fun lastFailure(handle: Long): String
 }
 

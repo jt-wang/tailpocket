@@ -39,6 +39,16 @@ final class UnitTests: XCTestCase {
         }
     }
 
+    // v0.3.5: the Go library's own answer (connectmobile/testdata/lastfailure.json) decodes with every field.
+    func testDialFailureDecodesTheGoAnswer() throws {
+        let file = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../../../connectmobile/testdata/lastfailure.json").standardized
+        let text = try String(contentsOf: file, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(try TailPocketDialFailure.parse(text),
+                       TailPocketDialFailure(code: "unreachable", reason: "no-answer", route: "relay",
+                                             routes: [.init(t: "lan", r: "refused"), .init(t: "relay", r: "no-answer")], at: 1795300000001))
+    }
+
     // v0.3.4, through the Go library: a relay nothing listens on gives no-answer after the request fails.
     func testLastFailureAfterAFailedRequest() async throws {
         let link = TailPocketHostLink(address: "", port: 0, name: "Mac", payload: nil, key: TailPocket.newKey(),

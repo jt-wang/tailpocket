@@ -149,10 +149,12 @@ class TailPocketTest {
         val native = FakeNative()
         val c = TailPocket.with(native).connect(TailPocketHostLink("tcM", 48931, "Mac", null, "privkey:1"))
         assertNull(c.lastFailure())
-        native.failure = """{"code":"handshake-closed","at":1795300000000,"route":"lan"}"""
-        assertEquals(TailPocketDialFailure("handshake-closed", 1795300000000, "lan"), c.lastFailure())
-        native.failure = """{"code":"unreachable","at":1795300000001,"route":""}"""
-        assertEquals("unreachable", c.lastFailure()?.code)
+        // What the Go library answers (connectmobile/testdata/lastfailure.json, written by TestLastFailureFixture).
+        native.failure = java.io.File("../../../connectmobile/testdata/lastfailure.json").readText().trim()
+        assertEquals(TailPocketDialFailure("unreachable", "no-answer", "relay",
+            listOf(TailPocketDialFailure.Route("lan", "refused"), TailPocketDialFailure.Route("relay", "no-answer")), 1795300000001), c.lastFailure())
+        native.failure = """{"code":"handshake-closed","reason":"handshake-closed","route":"lan","routes":[{"t":"lan","r":"handshake-closed"}],"at":1795300000000}"""
+        assertEquals("handshake-closed", c.lastFailure()?.reason)
         native.failure = "{}"
         assertNull(c.lastFailure())
         c.close()

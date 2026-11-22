@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -192,15 +193,17 @@ func TestLastFailureClearsAfterSuccess(t *testing.T) {
 
 const hostPK = "UCwaJaXCjEDB-rhHW28mR_hKMMwX_PEM5d6GMUMqNCo" // a valid key no computer here holds
 
-// closedAddr is a loopback address nothing listens on: a dial is refused at once.
+// closedAddr is a loopback address nothing listens on: a dial is refused at once. Port 1 is below
+// every system's ephemeral range, so no test running in parallel, in this package or another, is
+// given it by a ":0" listen and receives these dials (a freed ephemeral port could be).
 func closedAddr(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	const addr = "127.0.0.1:1"
+	if c, err := net.Dial("tcp", addr); err == nil {
+		c.Close()
+		t.Skip("something listens on " + addr)
 	}
-	defer ln.Close()
-	return ln.Addr().String()
+	return addr
 }
 
 // failOnce connects a link with these routes, makes one request through the forward, and returns
@@ -276,8 +279,10 @@ func TestLastFailureReasons(t *testing.T) {
 		{"nothing answers but a lan refusal", lanVia(closedAddr(t)) + "," + relayVia("wss://relay.invalid"), "no-answer", "relay", "lan:refused,relay:no-answer"},
 		{"relay down", relayVia(downURL), "relay-down", "relay", "relay:relay-down"},
 		{"relay down, lan refused", lanVia(closedAddr(t)) + "," + relayVia(downURL), "refused", "lan", "lan:refused,relay:relay-down"},
-		// The route that closed the handshake decides, not the last one tried.
-		{"handshake closed, relay unreachable", lanVia(closing.Addr().String()) + "," + relayVia("wss://relay.invalid"), "handshake-closed", "lan", "lan:handshake-closed,relay:no-answer"},
+		// A lan close is as weak as a lan refusal: with the relay unanswered, it is no-answer (v0.3.5).
+		{"handshake closed, relay unreachable", lanVia(closing.Addr().String()) + "," + relayVia("wss://relay.invalid"), "no-answer", "relay", "lan:handshake-closed,relay:no-answer"},
+		// With every route answered, the route that closed the handshake decides, not the last one tried.
+		{"handshake closed, relay down", lanVia(closing.Addr().String()) + "," + relayVia(downURL), "handshake-closed", "lan", "lan:handshake-closed,relay:relay-down"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := failOnce(t, c.via)
@@ -288,12 +293,10 @@ func TestLastFailureReasons(t *testing.T) {
 	}
 }
 
-// On a network that drops packets nothing answers and nothing refuses: the Dial must still end
-// (lastRoute; before v0.3.4 it hung for as long as the forward lived) and leave no-answer, so the app
-// can say the network may block the connection.
+// On a network that drops packets nothing answers and nothing refuses. The app's HTTP client gives up
+// first (3 s); the attempt behind it goes on until its own bound, here the handshake's 10 s, and then
+// leaves no-answer, so the app can say the network may block the connection.
 func TestLastFailureWhenTheAppGivesUp(t *testing.T) {
-	testhook.LastRoute.Store(int64(time.Second))
-	defer testhook.LastRoute.Store(0)
 	silent, err := net.Listen("tcp", "127.0.0.1:0") // takes the connection and never answers
 	if err != nil {
 		t.Fatal(err)
@@ -331,12 +334,47 @@ func TestLastFailureWhenTheAppGivesUp(t *testing.T) {
 		t.Fatal("fetch worked")
 	}
 	var f failure
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
 		if f = lastFailure(t, opened.Handle); f.Reason != "" {
 			break
 		}
 	}
 	if f.Reason != "no-answer" || f.routes() != "lan:no-answer" {
 		t.Fatalf("%+v, want no-answer on lan", f)
+	}
+}
+
+// testdata/lastfailure.json is LastFailure's answer, with "at" fixed, for a refused lan address and a
+// relay whose name does not resolve: the Kotlin and Swift tests decode this file (v0.3.5), so a field
+// the Go side adds and an SDK drops fails there. TAILPOCKET_UPDATE=1 rewrites it.
+func TestLastFailureFixture(t *testing.T) {
+	link := `{"name":"Mac","key":"` + NewKey() + `","pk":"` + hostPK + `","via":[` + lanVia(closedAddr(t)) + "," + relayVia("wss://relay.invalid") + `]}`
+	var opened struct {
+		Handle int64  `json:"handle"`
+		Port   int    `json:"port"`
+		Base   string `json:"base"`
+	}
+	_ = json.Unmarshal([]byte(Connect(link, "")), &opened)
+	defer Stop(opened.Handle)
+	if fetch(opened.Port, opened.Base) == nil {
+		t.Fatal("fetch worked")
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(LastFailure(opened.Handle)), &got); err != nil {
+		t.Fatal(err)
+	}
+	got["at"] = 1795300000001
+	body, _ := json.Marshal(got)
+	if os.Getenv("TAILPOCKET_UPDATE") != "" {
+		if err := os.WriteFile("testdata/lastfailure.json", append(body, '\n'), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile("testdata/lastfailure.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(want)) != string(body) {
+		t.Fatalf("LastFailure:\n%s\ntestdata/lastfailure.json:\n%s", body, want)
 	}
 }

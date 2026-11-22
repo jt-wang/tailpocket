@@ -101,7 +101,7 @@ You need Node 20 or newer. Everything else comes ready-built from the release.
 
 ```sh
 mkdir tailpocket-try && cd tailpocket-try
-R=https://github.com/jt-wang/tailpocket/releases/download/v0.3.4
+R=https://github.com/jt-wang/tailpocket/releases/download/v0.3.5
 npm install $R/tailpocket-node.tgz
 curl -fsSLO https://raw.githubusercontent.com/jt-wang/tailpocket/main/examples/node-host/server.mjs
 node server.mjs                                    # prints "QR tailpocket1:…", a one-time pairing code
@@ -115,7 +115,7 @@ In a second terminal in the same folder, play the phone (on a Mac with Apple sil
 `tailpocket-phone` for Intel Macs, Linux and Windows too):
 
 ```sh
-curl -fsSLo phone https://github.com/jt-wang/tailpocket/releases/download/v0.3.4/tailpocket-phone-darwin-arm64 && chmod +x phone
+curl -fsSLo phone https://github.com/jt-wang/tailpocket/releases/download/v0.3.5/tailpocket-phone-darwin-arm64 && chmod +x phone
 pbpaste | ./phone pair -key phone.key -out link.json -   # copy the tailpocket1:… text first
 ./phone connect -link link.json                         # prints "listening 127.0.0.1:PORT base BASE token …"
 curl BASE/hello.txt                                     # BASE is http://127.0.0.1:PORT/_tailpocket/<token>; "hello from the computer"

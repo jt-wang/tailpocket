@@ -136,14 +136,22 @@ class BridgeTest {
         assertEquals(4L, native.stopped)
     }
 
-    // v0.3.4: tailPocket.lastFailure is the code, time and route of the last failed attempt, or null.
+    // v0.3.4: tailPocket.lastFailure is the code, reason, route, routes and time of the last failed attempt (v0.3.5: reason and routes too), or null.
     @Test fun lastFailure() = runTest {
         @Suppress("UNCHECKED_CAST")
         val c = call("tailPocket.connect", mapOf("link" to mapOf("address" to "tcM", "port" to 48931, "name" to "Mac", "key" to "privkey:1"))) as Map<String, Any?>
         val h = mapOf("handle" to c["handle"])
         assertNull(call("tailPocket.lastFailure", h))
-        native.failure = """{"code":"handshake-closed","at":1795300000000,"route":"lan"}"""
-        assertEquals(mapOf("code" to "handshake-closed", "at" to 1795300000000L, "route" to "lan"), call("tailPocket.lastFailure", h))
+        // The Go library's own answer: every field reaches JavaScript, reason and routes included.
+        native.failure = java.io.File("../../../connectmobile/testdata/lastfailure.json").readText().trim()
+        assertEquals(mapOf("code" to "unreachable", "reason" to "no-answer", "route" to "relay",
+            "routes" to listOf(mapOf("t" to "lan", "r" to "refused"), mapOf("t" to "relay", "r" to "no-answer")), "at" to 1795300000001L),
+            call("tailPocket.lastFailure", h))
+        // A failure without a reason (revoked) still gives JavaScript reason "" and routes [].
+        native.failure = """{"code":"revoked","route":"lan","at":1795300000002}"""
+        @Suppress("UNCHECKED_CAST")
+        val revoked = call("tailPocket.lastFailure", h) as Map<String, Any?>
+        assertEquals("" to emptyList<Any?>(), revoked["reason"] to revoked["routes"])
         native.failure = """{"code":"unreachable","at":1795300000001,"route":"relay"}"""
         @Suppress("UNCHECKED_CAST")
         assertEquals("unreachable", (call("tailPocket.lastFailure", h) as Map<String, Any?>)["code"])

@@ -3,6 +3,8 @@ package io.jingtao.tailpocket
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -67,17 +69,30 @@ data class TailPocketPath(
 )
 
 /**
- * Why the last connection attempt through a [TailPocketConnection] failed (v0.3.4): [code] is "handshake-closed" (a
- * computer answered on [route] but closed the encrypted handshake: it is not running TailPocket there, or it has a new
- * identity and this phone must pair again), "unreachable", "timeout", "revoked", "unauthorized", "mismatch" or
- * "failed"; [at] is milliseconds since 1970; [route] is "lan", "relay", "tailcat" or "".
+ * Why the last connection attempt through a [TailPocketConnection] failed (v0.3.4). [reason] is what to tell the user:
+ * "refused" or "handshake-closed" (something answered for the computer and did not take this phone: TailPocket is not
+ * running there, or the computer was reset), "no-answer" (no route answered: the computer is off or asleep, or this
+ * network blocks it), "relay-down" (your relay would not carry the phone), or "" ([code] says it: "revoked",
+ * "unauthorized", "mismatch"). [code] is the code the other calls use; [route] decided [reason]; [routes] is every route
+ * tried; [at] is milliseconds since 1970.
  *
- * Not authenticated (only "revoked" comes from the computer itself): anyone on the network can make a route fail or
- * close a handshake. Show it to the user, for example to offer pairing again; never delete the link or its pinned key
- * because of it.
+ * Not authenticated (only "revoked" comes from the computer itself): anyone on the phone's network can refuse a
+ * connection, close a handshake or pose as the relay. Show it to the user; offer pairing again only as the user's own
+ * choice, and never delete the link or its pinned key because of it (SECURITY.md §6b).
  */
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
-data class TailPocketDialFailure(val code: String = "", val at: Long = 0, val route: String = "")
+data class TailPocketDialFailure(
+    val code: String = "",
+    @EncodeDefault val reason: String = "",
+    val route: String = "",
+    @EncodeDefault val routes: List<Route> = emptyList(),
+    val at: Long = 0,
+) {
+    /** How one route ended: [t] "lan", "relay" or "tailcat"; [r] "refused", "no-host", "handshake-closed", "relay-down" or "no-answer". */
+    @Serializable
+    data class Route(val t: String, val r: String)
+}
 
 /**
  * Everything a paired phone needs to reach its computer. Holds the phone's private key: keep it in [TailPocketKeystoreStore].
