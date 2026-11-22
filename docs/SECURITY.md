@@ -176,6 +176,31 @@ routes when the computer sends none it can use (`TestAuditV032EmptyRoutesDoNotWi
 a bridge call without `routes` is refused instead of allowing every route
 (`testSetRoutesWithoutAListIsRefused`, `setRoutesWithoutAListIsRefused`).
 
+## 6b. Why a connection failed is a hint, not a fact (v0.3.4)
+
+`lastFailure()` (Go `Session.LastFailure`, mobile `LastFailure`, Swift, Kotlin, JS and React Native
+`lastFailure`, bridge `tailPocket.lastFailure`) says why the last attempt to reach the computer failed:
+`refused`, `handshake-closed`, `no-answer` or `relay-down`, with how each route ended. **None of it is
+authenticated.** It comes from TCP (a refused connection), from the relay (an HTTP status, close code
+4404 "no computer in this room") or from a handshake cut short, and anyone on the path can produce
+each one: a device that holds the computer's old address on another network, a captive portal, a fake
+relay, an attacker who resets connections. So:
+
+- It is for the message the user sees, such as "TailPocket is not running on the computer, or it was
+  reset: open it, or pair again" or "this network may block the connection". The app must never delete
+  the link, unpair, or replace or drop the pinned host key because of it. Pairing again stays the user's
+  choice; the old link keeps working if the computer comes back.
+- `refused` from the lan route alone counts only when no route went unanswered: on a plane every other
+  route times out while some device refuses the old lan address, and that is `no-answer`
+  (`TestLastFailureReasons`).
+- A computer that was reset cannot be told apart from one not running TailPocket: the automatic lan port
+  comes from the computer's Noise key, so a new identity listens on another port, and its relay room
+  differs too. Both read as `refused`.
+- Only `revoked` comes from the computer itself, inside the encrypted session; it is reported as before.
+
+The phone keeps one record per connection handle, in memory, and clears it after a connection works
+(`TestLastFailureClearsAfterSuccess`). It holds the route types and reasons, no address or key.
+
 ## 7. Push notifications
 
 See [PUSH.md](PUSH.md); the gateway (`cmd/tailpocket-push`) is code only, not deployed.

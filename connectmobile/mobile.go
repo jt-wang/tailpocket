@@ -445,6 +445,46 @@ func Path(handle int64, timeoutMs int) string {
 	return string(body)
 }
 
+// LastFailure is why the handle's last connection attempt failed (v0.3.4), or {} when none failed
+// since the last one that worked. The forward only closes a local connection whose dial failed, so
+// this is where the app learns why:
+//
+//	{"code":c,"reason":r,"route":t,"routes":[{"t":"lan","r":"refused"},…],"at":unixMillis}
+//
+// reason is what to tell the user:
+//   - "refused" or "handshake-closed": something answered for the computer and did not take this
+//     phone (your relay has no computer in its room, the computer's address refused it, or closed the
+//     encrypted handshake). TailPocket is not running there, or the computer was reset: open it, or
+//     pair again.
+//   - "no-answer": no route answered. The computer is off or asleep, or this network blocks it.
+//   - "relay-down": your relay answered but would not carry the phone, and nothing else answered.
+//   - "": code says it (revoked, unauthorized, mismatch), or no route was tried.
+//
+// code is the code of the other calls ("unreachable", "handshake-closed", "timeout", "revoked", …);
+// route is the route type that decided reason; routes is every route tried, with "refused",
+// "no-host", "handshake-closed", "relay-down" or "no-answer". {"error":"unknown-handle"} for a
+// closed handle.
+//
+// None of it is authenticated (only "revoked" comes from the computer over the encrypted session):
+// anyone on the network can refuse a connection or pose as the relay's answer. Use it for the
+// message the user sees; never delete the link or replace the pinned host key because of it.
+func LastFailure(handle int64) string {
+	c := lookup(handle)
+	if c == nil {
+		return fail("unknown-handle")
+	}
+	f, ok := c.session.LastFailure()
+	if !ok {
+		return "{}"
+	}
+	routes := make([]map[string]string, 0, len(f.Routes))
+	for _, r := range f.Routes {
+		routes = append(routes, map[string]string{"t": r.Route, "r": r.Reason})
+	}
+	body, _ := json.Marshal(map[string]any{"code": code(f.Err), "reason": f.Reason, "route": f.Route, "routes": routes, "at": f.At.UnixMilli()})
+	return string(body)
+}
+
 // Stop closes a Connect handle. Unknown or repeated handles are ignored.
 func Stop(handle int64) {
 	connMu.Lock()

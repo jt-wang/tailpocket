@@ -30,7 +30,7 @@ public final class TailPocketBridge: @unchecked Sendable {
 
     public static let names = [
         "tailPocket.newKey", "tailPocket.publicKey", "tailPocket.inviteText", "tailPocket.decodeInvite", "tailPocket.decodeInvite2",
-        "tailPocket.pair", "tailPocket.connect", "tailPocket.disconnect", "tailPocket.sync", "tailPocket.path", "tailPocket.link",
+        "tailPocket.pair", "tailPocket.connect", "tailPocket.disconnect", "tailPocket.sync", "tailPocket.path", "tailPocket.link", "tailPocket.lastFailure",
         "tailPocket.nearby.start", "tailPocket.nearby.stop", "tailPocket.local.begin", "tailPocket.local.finish", "tailPocket.local.cancel", "tailPocket.scan",
         "tailPocket.store.phoneKey", "tailPocket.store.saveLink", "tailPocket.store.link", "tailPocket.store.deleteLink",
         "tailPocket.setTailcatOnly", "tailPocket.setRoutes",
@@ -152,6 +152,9 @@ public final class TailPocketBridge: @unchecked Sendable {
             return try Self.value(try await connection(args).connection.path(timeout: timeout))
         },
         "tailPocket.link": { [unowned self] a in try Self.value(try connection(Self.dict(a)).connection.currentLink()) },
+        "tailPocket.lastFailure": { [unowned self] a in
+            try connection(Self.dict(a)).connection.lastFailure().map { try Self.value($0) }
+        },
         "tailPocket.nearby.start": { [unowned self] a in
             let service = try Self.string(a, "service")
             let source = nearbyFor(service)

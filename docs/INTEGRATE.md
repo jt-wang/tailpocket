@@ -6,14 +6,14 @@ nothing to clone, no Go or gomobile. To build them yourself, see [BUILD.md](BUIL
 
 ## 0. The packages
 
-`R=https://github.com/jt-wang/tailpocket/releases/download/v0.3.3` below.
+`R=https://github.com/jt-wang/tailpocket/releases/download/v0.3.4` below.
 
 | Side | Get it |
 |---|---|
 | Computer, Node | `npm install $R/tailpocket-node.tgz` (the helper for macOS, Linux and Windows is inside) |
-| Computer, Go | `go get github.com/jt-wang/tailpocket@v0.3.3` |
+| Computer, Go | `go get github.com/jt-wang/tailpocket@v0.3.4` |
 | Computer, any language | the helper `$R/tailpocket-host-<os>-<arch>` (`darwin-arm64`, `darwin-amd64`, `linux-amd64`, `linux-arm64`, `windows-amd64.exe`) |
-| Phone, Swift | Swift package `https://github.com/jt-wang/tailpocket`, from `0.3.3` |
+| Phone, Swift | Swift package `https://github.com/jt-wang/tailpocket`, from `0.3.4` |
 | Phone, Kotlin | unzip `$R/tailpocket-android-m2.zip` into your project and add its `m2` folder as a Maven repository |
 | Phone, React Native | `npm install $R/react-native-tailpocket.tgz` |
 | Phone, NSH | `npm install $R/tailpocket-client.tgz`, and the native adapter from the Swift or Kotlin row |
@@ -51,7 +51,7 @@ under it (`curl <base>/`).
 Pick a Bonjour service type for your app (`_myapp._tcp`, at most 15 characters between `_` and
 `._tcp`) and use the same one on both sides.
 
-**iOS / macOS (Swift):** add the Swift package `https://github.com/jt-wang/tailpocket` (from `0.3.3`; it
+**iOS / macOS (Swift):** add the Swift package `https://github.com/jt-wang/tailpocket` (from `0.3.4`; it
 downloads the prebuilt `TailPocketMobile.xcframework` from the release); depend on `TailPocket`
 and, for the camera scanner and pairing view, `TailPocketUI`. In Info.plist add
 `NSCameraUsageDescription`, `NSLocalNetworkUsageDescription`, and your service under
@@ -62,7 +62,7 @@ Check: `swift test`; with the computer running, `TAILPOCKET_LIVE=1 swift test --
 
 **Android (Kotlin):** unzip `tailpocket-android-m2.zip` into your project, add
 `maven { url = uri("m2") }` (the path to that folder) and depend on
-`io.jingtao.tailpocket:tailpocket:0.3.3` (and `tailpocket-ui` for the Compose
+`io.jingtao.tailpocket:tailpocket:0.3.4` (and `tailpocket-ui` for the Compose
 scanner and `TailPocketPairingScreen`). The libraries declare INTERNET, ACCESS_NETWORK_STATE and CAMERA.
 Set `android:networkSecurityConfig="@xml/tailpocket_network_security_config"` on your
 `<application>` (or add its `127.0.0.1` domain-config to your own config): Android refuses plain
@@ -100,7 +100,7 @@ real host.
 
 ## 4. What v0.3 adds
 
-The packages above are v0.3.3. Everything in sections 1 to 3 applies, with these additions. Moving
+The packages above are v0.3.4. Everything in sections 1 to 3 applies, with these additions. Moving
 from v0.2, read the upgrade notes under v0.3.0 in [CHANGELOG.md](../CHANGELOG.md) first.
 
 ### Defaults: nothing to configure
@@ -205,6 +205,25 @@ the connection's token, and your app MUST follow these rules:
   with a wrong token, the connection is closed and the computer is never dialed.
 - Keep the token (`token` on the connection) in memory only: never store, log or send it anywhere. A
   new `connect` gets a new token.
+
+### When it cannot connect: tell the user why (v0.3.4)
+
+A request through the forward that cannot reach the computer fails like a dropped connection. Then
+read `lastFailure()` on the connection (Swift `try connection.lastFailure()`, Kotlin
+`connection.lastFailure()`, JS `await conn.lastFailure()`) and show one of three messages instead of
+"Connecting…" forever:
+
+| `reason` | Show |
+|---|---|
+| `refused`, `handshake-closed` | "TailPocket isn't running on the computer, or it was reset. Open it there; if it was reset, pair again." |
+| `no-answer` | "Can't reach the computer. Check it's on and awake; this network may block the connection." |
+| `relay-down` | "Your relay server can't be reached." |
+
+`null` means nothing failed since the last connection that worked; `revoked` keeps its own handling
+(delete the link). The reason is not authenticated: offer pairing again as a button, never unpair or
+delete the link because of it (SECURITY.md §6b). A Dial gives up after at most 30 s on its last route,
+so on a network that drops packets the first request fails within that and `lastFailure` says
+`no-answer`.
 
 ### Compatibility
 

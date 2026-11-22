@@ -25,7 +25,7 @@ Every package is ready-built in the latest release; nothing to clone or build. T
 file for each stack. Download the test phone for this computer too, into a temp folder:
 
 ```sh
-R=https://github.com/jt-wang/tailpocket/releases/download/v0.3.3
+R=https://github.com/jt-wang/tailpocket/releases/download/v0.3.4
 T=$(mktemp -d)   # 0700; the test phone's key goes here too
 curl -fsSLo "$T/tailpocket-phone" "$R/tailpocket-phone-<os>-<arch>" && chmod +x "$T/tailpocket-phone"
 ```

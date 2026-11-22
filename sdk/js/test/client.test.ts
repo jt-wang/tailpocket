@@ -151,13 +151,38 @@ test("the names it calls are the bridge's names", async () => {
   const tailPocket = createTailPocket(t);
   await tailPocket.newKey(); await tailPocket.publicKey("k"); await tailPocket.inviteText("t"); await tailPocket.decodeInvite("t"); await tailPocket.pair("t", { device: "d" });
   await tailPocket.decodeInvite2("t"); await tailPocket.setTailcatOnly(false); await tailPocket.setRoutes(null);
-  const conn = await tailPocket.connect(); await conn.sync(); await conn.path(); await conn.link(); await conn.close();
+  const conn = await tailPocket.connect(); await conn.sync(); await conn.path(); await conn.link(); await conn.lastFailure(); await conn.close();
   await (await tailPocket.nearby("s", () => {}))(); const p = await tailPocket.pairNearby({ name: "n" }); await p.finish(); await p.cancel();
   await tailPocket.scan(); await tailPocket.store.phoneKey(); await tailPocket.store.saveLink(link); await tailPocket.store.link(); await tailPocket.store.deleteLink();
   const { readFileSync } = await import("node:fs");
   const kotlin = readFileSync(new URL("../../android/tailpocket/src/main/java/io/jingtao/tailpocket/Bridge.kt", import.meta.url), "utf8");
   const bridge = [...kotlin.matchAll(/"(tailPocket\.[a-zA-Z0-9.]+)"/g)].map((m) => m[1]).filter((n) => n !== "tailPocket.nearby" && n !== "tailPocket.pair.emoji"); // events
   assert.deepEqual([...names].sort(), [...new Set(bridge)].sort());
+});
+
+test("lastFailure: handshake-closed, no-answer, then null once a connection worked (v0.3.4)", async () => {
+  const answers: unknown[] = [
+    { code: "handshake-closed", reason: "handshake-closed", route: "lan", routes: [{ t: "lan", r: "handshake-closed" }], at: 1795300000000 },
+    { code: "unreachable", reason: "no-answer", route: "relay", routes: [{ t: "lan", r: "refused" }, { t: "relay", r: "no-answer" }], at: 1795300000001 },
+    null, undefined,
+  ];
+  const calls: unknown[] = [];
+  const t: TailPocketTransport = {
+    async call(n, args) {
+      if (n === "tailPocket.connect") return { handle: 3, port: 1, baseUrl: "" };
+      calls.push(args);
+      return answers.shift();
+    },
+    on: () => () => {},
+  };
+  const c = await createTailPocket(t).connect();
+  assert.equal((await c.lastFailure())?.reason, "handshake-closed");
+  const f = await c.lastFailure();
+  assert.equal(f?.reason, "no-answer");
+  assert.deepEqual(f?.routes, [{ t: "lan", r: "refused" }, { t: "relay", r: "no-answer" }]);
+  assert.equal(await c.lastFailure(), null);
+  assert.equal(await c.lastFailure(), null, "a bridge that answers nothing for null");
+  assert.deepEqual(calls[0], { handle: 3 });
 });
 
 test("a connection syncs, reports its path and link by handle", async () => {

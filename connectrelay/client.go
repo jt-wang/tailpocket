@@ -222,7 +222,7 @@ func DialPhone(ctx context.Context, relayURL, room string, client *http.Client) 
 	c, resp, err := websocket.Dial(ctx, u, dialOptions(nil, client))
 	if err != nil {
 		if resp != nil {
-			return nil, fmt.Errorf("%w: %s answered %d", ErrUnreachable, NormalizeHost(relayURL), resp.StatusCode)
+			return nil, fmt.Errorf("%w: %w: %s answered %d", ErrUnreachable, ErrRelayAnswered, NormalizeHost(relayURL), resp.StatusCode)
 		}
 		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
 	}
@@ -233,6 +233,18 @@ func DialPhone(ctx context.Context, relayURL, room string, client *http.Client) 
 // included: they are not encrypted, so anyone on the path can send one, and none of them means the
 // phone was unpaired. Only the encrypted bye says that.
 var ErrUnreachable = errors.New("connectrelay: unreachable")
+
+// Two of those failures say more than "unreachable" (v0.3.4), each wrapped together with
+// ErrUnreachable. Both come from the relay, never from the computer, so they can only explain a
+// failure to the user; neither says anything about whether the phone is still paired.
+var (
+	// ErrNoHost: the relay carried the phone into its room and no computer was there (close code
+	// 4404): the computer is off, is not running TailPocket, or uses another room now (a new identity).
+	ErrNoHost = errors.New("connectrelay: no computer in this room")
+	// ErrRelayAnswered: the relay answered and would not carry the phone: an HTTP status instead of
+	// the WebSocket upgrade, or another close code (relay full, stopping, too many requests).
+	ErrRelayAnswered = errors.New("connectrelay: the relay refused the phone")
+)
 
 // ValidURL reports whether s is a relay URL the clients accept: wss://, or ws:// to a loopback host.
 func ValidURL(s string) bool { _, err := wsURL(s, ""); return err == nil }
@@ -272,7 +284,11 @@ func (c *wsConn) RemoteAddr() net.Addr { return c.addr }
 func (c *wsConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if err != nil && err != io.EOF && websocket.CloseStatus(err) != -1 {
-		err = fmt.Errorf("%w: closed with %d", ErrUnreachable, websocket.CloseStatus(err))
+		why := ErrRelayAnswered
+		if websocket.CloseStatus(err) == CloseNoHost {
+			why = ErrNoHost
+		}
+		err = fmt.Errorf("%w: %w: closed with %d", ErrUnreachable, why, websocket.CloseStatus(err))
 	}
 	return n, err
 }

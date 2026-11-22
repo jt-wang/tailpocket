@@ -17,8 +17,12 @@ Packages can then be used from the checkout: `npm install <checkout>/sdk/node`, 
 `maven { url = uri("<checkout>/build/android/m2") }`. A React Native app linked to the checkout needs Metro to watch
 `sdk/react-native` and `sdk/js` (see `examples/rn-phone/metro.config.js`).
 
-`./scripts/build-release.sh <version>` builds every release file into `dist/release/` and prints the checksum
-`Package.swift` needs.
+A release is built in two steps, so the Go programs record the very commit that is tagged:
+`./scripts/build-release.sh framework <version>` builds `dist/framework/TailPocketMobile.xcframework.zip` and
+prints the checksum `Package.swift` needs (the framework records no commit). Put it and the release URL in
+`Package.swift` and commit; then `./scripts/build-release.sh <version>`, with a clean tree, builds every other
+release file into `dist/release/` from that commit and fails unless each Go program records it as
+`vcs.revision`, unmodified.
 
 ## Tests
 

@@ -47,6 +47,8 @@ class TailPocketTest {
         override fun sync(handle: Long, timeoutMs: Long) = """{"address":"tcM","port":48931,"name":"Mac","key":"privkey:1","pk":"PK","via":[{"t":"relay","u":"wss://relay.example.com","r":"R"}]}"""
         override fun link(handle: Long) = sync(handle, 0)
         override fun path(handle: Long, timeoutMs: Long) = if (handle == 4L) """{"route":"relay","relay":"relay.example.com"}""" else """{"error":"revoked"}"""
+        var failure = "{}"
+        override fun lastFailure(handle: Long) = if (handle == 4L) failure else """{"error":"unknown-handle"}"""
     }
 
     @Test fun keys() {
@@ -142,7 +144,21 @@ class TailPocketTest {
         }
     }
 
-    @Test fun connectGivesALocalUrl() {
+    // v0.3.4: why the last attempt failed, and null once one worked.
+    @Test fun lastFailure() {
+        val native = FakeNative()
+        val c = TailPocket.with(native).connect(TailPocketHostLink("tcM", 48931, "Mac", null, "privkey:1"))
+        assertNull(c.lastFailure())
+        native.failure = """{"code":"handshake-closed","at":1795300000000,"route":"lan"}"""
+        assertEquals(TailPocketDialFailure("handshake-closed", 1795300000000, "lan"), c.lastFailure())
+        native.failure = """{"code":"unreachable","at":1795300000001,"route":""}"""
+        assertEquals("unreachable", c.lastFailure()?.code)
+        native.failure = "{}"
+        assertNull(c.lastFailure())
+        c.close()
+    }
+
+        @Test fun connectGivesALocalUrl() {
         val tc = TailPocket.with(FakeNative())
         val c = tc.connect(TailPocketHostLink("tcM", 48931, "Mac", null, "privkey:1"))
         assertEquals("http://127.0.0.1:5555/_tailpocket/TOK", c.baseUrl)

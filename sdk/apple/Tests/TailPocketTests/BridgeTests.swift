@@ -38,7 +38,7 @@ final class BridgeTests: XCTestCase {
 
     func testNamesMatchTheContract() {
         XCTAssertEqual(Set(makeBridge().functions.keys), Set(TailPocketBridge.names))
-        XCTAssertEqual(TailPocketBridge.names.count, 23)
+        XCTAssertEqual(TailPocketBridge.names.count, 24)
     }
 
     func testKeysInviteTextAndErrors() async throws {

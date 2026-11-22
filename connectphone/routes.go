@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/flynn/noise"
@@ -39,16 +40,21 @@ import (
 )
 
 // Version is the library version the phone sends in its encrypted hello.
-const Version = "0.3.3"
+const Version = "0.3.4"
 
 // ErrRevoked: the host said, encrypted, that this phone is no longer paired. Pair again.
 var ErrRevoked = errors.New("connectphone: the host no longer has this phone paired")
 
-// perRoute bounds one route's attempt while others are left to try; lanDial bounds each lan address.
+// perRoute bounds one route's attempt while others are left to try, lastRoute the last route's (it
+// gets longer: nothing else is left), and lanDial each lan address. Before v0.3.4 the last route had
+// no bound but the caller's context, which the forward's HTTP side never ends: on a network that drops
+// packets such a Dial hung and never failed, so the app could only say "Connecting…".
+//
 // After a Dial, the session looks for a better route in the background (Session.upgrade), each for
 // at most upgradeTry, once per upgradeRetry.
 const (
 	perRoute     = 10 * time.Second
+	lastRoute    = 30 * time.Second
 	lanDial      = 3 * time.Second
 	upgradeTry   = 5 * time.Second
 	upgradeRetry = 30 * time.Second
@@ -116,7 +122,126 @@ type Session struct {
 	drained []*connectsecure.Session // replaced sessions still carrying connections (Drain)
 	revoked bool
 	closed  bool
-	upTry   time.Time // when Dial last looked for a better route (upgrade)
+	upTry   time.Time    // when Dial last looked for a better route (upgrade)
+	failure *DialFailure // the last Dial that failed, nil after one succeeds
+}
+
+// DialFailure is why the last Dial of a Session failed (v0.3.4), when, and how each route ended. A
+// Dial that succeeds clears it. Err is what Dial returned (errors.Is works: ErrUnreachable,
+// connectsecure.ErrHandshakeClosed, ErrRevoked, ...). Route is the route type that decided Reason
+// ("lan", "relay", "tailcat"; "" when no route was tried).
+//
+// Reason sorts a failure to reach the computer into what the user can do about it:
+//   - ReasonRefused or ReasonHandshakeClosed: something answered for the computer and did not take
+//     this phone. Your relay has no computer in this phone's room, or the computer's address refused
+//     the connection, or closed the encrypted handshake. TailPocket is not running there, or the
+//     computer was reset and has a new identity (then the phone must pair again).
+//   - ReasonNoAnswer: no route answered at all. The computer is off or asleep, or the network
+//     blocks the connection (a plane's or hotel's Wi-Fi).
+//   - ReasonRelayDown: your relay answered but would not carry the phone, and nothing else answered.
+//   - "": Err is ErrRevoked, ErrUnauthorized, connectsecure.ErrProtoMismatch, or no route was tried.
+//
+// None of it is authenticated: anything on the network can refuse a connection, close a handshake,
+// or pose as the relay's answer. Show it to the user, never act on it alone: it must not delete the
+// link, unpair, or replace the pinned host key. Only ErrRevoked comes from the computer itself, over
+// the encrypted session (SECURITY.md).
+type DialFailure struct {
+	Err    error
+	At     time.Time
+	Route  string
+	Reason string
+	Routes []RouteFailure // every route the Dial tried, in order
+}
+
+// RouteFailure is how one route of a failed Dial ended: Reason is one of the Route* reasons.
+type RouteFailure struct {
+	Route  string // "lan", "relay", "tailcat"
+	Reason string
+}
+
+// Reasons of a DialFailure; RouteFailure also uses RouteRefused and RouteNoHost.
+const (
+	ReasonRefused         = "refused"
+	ReasonHandshakeClosed = "handshake-closed"
+	ReasonNoAnswer        = "no-answer"
+	ReasonRelayDown       = "relay-down"
+	RouteRefused          = "refused" // lan: the address refused the TCP connection
+	RouteNoHost           = "no-host" // relay: no computer in the phone's room
+)
+
+// routeReason sorts the error one route of a Dial ended with.
+func routeReason(err error) string {
+	switch {
+	case errors.Is(err, connectsecure.ErrHandshakeClosed):
+		return ReasonHandshakeClosed
+	case errors.Is(err, connectrelay.ErrNoHost):
+		return RouteNoHost
+	case errors.Is(err, connectrelay.ErrRelayAnswered):
+		return ReasonRelayDown
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return RouteRefused
+	}
+	return ReasonNoAnswer // timeouts, no route to the address, DNS, TLS: nothing that is the computer's
+}
+
+// dialReason is a Dial's Reason from its routes, and the route that decided it. A lan refusal alone
+// is weak evidence: on another network the same address may be another device, so it counts only
+// when no other route went unanswered (on a plane, everything else times out).
+func dialReason(routes []RouteFailure) (reason, route string) {
+	find := func(want string) (string, bool) {
+		for _, r := range routes {
+			if r.Reason == want {
+				return r.Route, true
+			}
+		}
+		return "", false
+	}
+	if t, ok := find(ReasonHandshakeClosed); ok {
+		return ReasonHandshakeClosed, t
+	}
+	if t, ok := find(RouteNoHost); ok {
+		return ReasonRefused, t
+	}
+	if t, ok := find(RouteRefused); ok {
+		if _, unanswered := find(ReasonNoAnswer); !unanswered {
+			return ReasonRefused, t
+		}
+	}
+	if t, ok := find(ReasonRelayDown); ok {
+		return ReasonRelayDown, t
+	}
+	if len(routes) == 0 {
+		return "", ""
+	}
+	return ReasonNoAnswer, routes[len(routes)-1].Route
+}
+
+// LastFailure returns the last failed Dial, if no Dial has succeeded since.
+func (s *Session) LastFailure() (DialFailure, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failure == nil {
+		return DialFailure{}, false
+	}
+	return *s.failure, true
+}
+
+// dialed records how a Dial ended. A Dial the caller gave up on counts too, its route still trying
+// as no-answer: on a network that drops packets, the app's own timeout is all that ends a Dial.
+func (s *Session) dialed(err error, routes []RouteFailure) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err == nil {
+		s.failure = nil
+		return
+	}
+	f := &DialFailure{Err: err, At: time.Now(), Routes: routes}
+	if !errors.Is(err, ErrRevoked) && !errors.Is(err, ErrUnauthorized) && !errors.Is(err, connectsecure.ErrProtoMismatch) {
+		f.Reason, f.Route = dialReason(routes)
+	} else if len(routes) > 0 {
+		f.Route = routes[len(routes)-1].Route
+	}
+	s.failure = f
 }
 
 // Connect prepares a session; nothing goes over the network until the first Dial.
@@ -201,7 +326,9 @@ func (s *Session) attemptsLocked() []connectinvite.Route {
 }
 
 // Dial opens one connection to the host's app, over the first route that answers.
-func (s *Session) Dial(ctx context.Context) (net.Conn, error) {
+func (s *Session) Dial(ctx context.Context) (_ net.Conn, err error) {
+	var tried []RouteFailure
+	defer func() { s.dialed(err, tried) }()
 	s.mu.Lock()
 	revoked, list, start := s.revoked, s.attemptsLocked(), s.last
 	s.mu.Unlock()
@@ -212,11 +339,16 @@ func (s *Session) Dial(ctx context.Context) (net.Conn, error) {
 		return nil, fmt.Errorf("%w: no route this library knows", ErrUnreachable)
 	}
 	var errs []error
+	closedOn := false
 	for i, r := range list {
-		actx, cancel := ctx, context.CancelFunc(func() {})
-		if i < len(list)-1 {
-			actx, cancel = context.WithTimeout(ctx, perRoute)
+		limit := perRoute
+		if i == len(list)-1 {
+			limit = lastRoute
+			if d := time.Duration(testhook.LastRoute.Load()); d > 0 {
+				limit = d
+			}
 		}
+		actx, cancel := context.WithTimeout(ctx, limit)
 		c, err := s.dialRoute(actx, r)
 		cancel()
 		if err == nil {
@@ -228,16 +360,18 @@ func (s *Session) Dial(ctx context.Context) (net.Conn, error) {
 			s.upgrade(list, r)
 			return c, nil
 		}
+		tried = append(tried, RouteFailure{Route: r.T, Reason: routeReason(err)})
 		if errors.Is(err, ErrRevoked) || errors.Is(err, ErrUnauthorized) || errors.Is(err, connectsecure.ErrProtoMismatch) {
 			return nil, err
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", r.T, err))
+		closedOn = closedOn || errors.Is(err, connectsecure.ErrHandshakeClosed)
 		if ctx.Err() != nil {
 			break
 		}
 	}
 	all := errors.Join(errs...)
-	if errors.Is(all, connectsecure.ErrHandshakeClosed) { // a route answered but closed: say so
+	if closedOn { // a route answered but closed: say so
 		return nil, fmt.Errorf("%w: %w: %v", ErrUnreachable, connectsecure.ErrHandshakeClosed, all)
 	}
 	return nil, fmt.Errorf("%w: %v", ErrUnreachable, all)

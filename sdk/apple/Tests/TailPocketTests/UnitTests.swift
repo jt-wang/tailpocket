@@ -26,6 +26,36 @@ final class UnitTests: XCTestCase {
         }
     }
 
+    // v0.3.4: lastFailure decodes the Go library's answer; "{}" (cleared after a working connection) is nil.
+    func testDialFailureParses() throws {
+        XCTAssertNil(try TailPocketDialFailure.parse("{}"))
+        let f = try XCTUnwrap(try TailPocketDialFailure.parse(
+            #"{"code":"handshake-closed","reason":"handshake-closed","route":"lan","routes":[{"t":"lan","r":"handshake-closed"},{"t":"relay","r":"no-answer"}],"at":1795300000000}"#))
+        XCTAssertEqual(f, TailPocketDialFailure(code: "handshake-closed", reason: "handshake-closed", route: "lan",
+                                                routes: [.init(t: "lan", r: "handshake-closed"), .init(t: "relay", r: "no-answer")], at: 1795300000000))
+        XCTAssertEqual(f.date.timeIntervalSince1970, 1795300000, accuracy: 0.001)
+        XCTAssertThrowsError(try TailPocketDialFailure.parse(#"{"error":"unknown-handle"}"#)) {
+            XCTAssertEqual($0 as? TailPocketError, TailPocketError(code: "unknown-handle"))
+        }
+    }
+
+    // v0.3.4, through the Go library: a relay nothing listens on gives no-answer after the request fails.
+    func testLastFailureAfterAFailedRequest() async throws {
+        let link = TailPocketHostLink(address: "", port: 0, name: "Mac", payload: nil, key: TailPocket.newKey(),
+                                      hostKey: String(repeating: "A", count: 43),
+                                      via: [TailPocketRoute(t: "relay", u: "ws://127.0.0.1:1", r: "AAAAAAAAAAAAAAAAAAAAAA")])
+        let c = try TailPocket.connect(link)
+        XCTAssertNil(try c.lastFailure())
+        var req = URLRequest(url: c.baseURL.appendingPathComponent("x")); req.timeoutInterval = 20
+        _ = try? await URLSession(configuration: .ephemeral).data(for: req)
+        let f = try XCTUnwrap(try c.lastFailure())
+        XCTAssertEqual(f.code, "unreachable")
+        XCTAssertEqual(f.reason, "no-answer")
+        XCTAssertEqual(f.routes, [.init(t: "relay", r: "no-answer")])
+        c.close()
+        XCTAssertThrowsError(try c.lastFailure()) { XCTAssertEqual($0 as? TailPocketError, TailPocketError(code: "unknown-handle")) }
+    }
+
     func testConnectRejectsBadLink() {
         let link = TailPocketHostLink(address: "nope", port: 1, name: "x", payload: nil, key: "k")
         XCTAssertThrowsError(try TailPocket.connect(link))

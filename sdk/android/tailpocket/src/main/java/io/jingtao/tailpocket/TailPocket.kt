@@ -67,6 +67,19 @@ data class TailPocketPath(
 )
 
 /**
+ * Why the last connection attempt through a [TailPocketConnection] failed (v0.3.4): [code] is "handshake-closed" (a
+ * computer answered on [route] but closed the encrypted handshake: it is not running TailPocket there, or it has a new
+ * identity and this phone must pair again), "unreachable", "timeout", "revoked", "unauthorized", "mismatch" or
+ * "failed"; [at] is milliseconds since 1970; [route] is "lan", "relay", "tailcat" or "".
+ *
+ * Not authenticated (only "revoked" comes from the computer itself): anyone on the network can make a route fail or
+ * close a handshake. Show it to the user, for example to offer pairing again; never delete the link or its pinned key
+ * because of it.
+ */
+@Serializable
+data class TailPocketDialFailure(val code: String = "", val at: Long = 0, val route: String = "")
+
+/**
  * Everything a paired phone needs to reach its computer. Holds the phone's private key: keep it in [TailPocketKeystoreStore].
  * [hostKey] and [via] (v0.3) are the computer's end-to-end key and its routes besides Tailcat; a link paired before v0.3 has
  * neither until [TailPocketConnection.sync], and one paired over a relay may have an empty [address]. Store the link again
@@ -131,6 +144,13 @@ class TailPocketConnection internal constructor(
     /** How the connection reaches the computer now. Throws "revoked" once the computer removed this phone. */
     suspend fun path(timeoutMs: Long = 5_000): TailPocketPath =
         withContext(Dispatchers.IO) { decode(TailPocketPath.serializer(), native.path(handle, timeoutMs)) }
+
+    /**
+     * Why the last connection attempt failed, or null when none failed since the last one that worked. The forward only
+     * closes a connection whose attempt failed, so your HTTP client sees a dropped connection; read this then.
+     */
+    fun lastFailure(): TailPocketDialFailure? =
+        decode(TailPocketDialFailure.serializer(), native.lastFailure(handle)).takeIf { it.code.isNotEmpty() }
 
     @Synchronized
     override fun close() {

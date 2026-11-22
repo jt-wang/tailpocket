@@ -117,6 +117,7 @@ class TailPocketBridge(
         },
         "tailPocket.path" to { a -> toValue(TailPocketPath.serializer(), connection(a).first.path(a.long("timeoutMs") ?: 5_000)) },
         "tailPocket.link" to { a -> toValue(TailPocketHostLink.serializer(), connection(a).first.currentLink()) },
+        "tailPocket.lastFailure" to { a -> connection(a).first.lastFailure()?.let { toValue(TailPocketDialFailure.serializer(), it) } },
         "tailPocket.nearby.start" to { a ->
             val service = a.string("service")
             synchronized(this) {
@@ -173,7 +174,7 @@ class TailPocketBridge(
     companion object {
         val NAMES = listOf(
             "tailPocket.newKey", "tailPocket.publicKey", "tailPocket.inviteText", "tailPocket.decodeInvite", "tailPocket.decodeInvite2",
-            "tailPocket.pair", "tailPocket.connect", "tailPocket.disconnect", "tailPocket.sync", "tailPocket.path", "tailPocket.link",
+            "tailPocket.pair", "tailPocket.connect", "tailPocket.disconnect", "tailPocket.sync", "tailPocket.path", "tailPocket.link", "tailPocket.lastFailure",
             "tailPocket.nearby.start", "tailPocket.nearby.stop", "tailPocket.local.begin", "tailPocket.local.finish", "tailPocket.local.cancel", "tailPocket.scan",
             "tailPocket.store.phoneKey", "tailPocket.store.saveLink", "tailPocket.store.link", "tailPocket.store.deleteLink",
             "tailPocket.setTailcatOnly", "tailPocket.setRoutes",

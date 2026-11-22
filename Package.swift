@@ -9,8 +9,8 @@ let haveLocal = FileManager.default.fileExists(atPath: Context.packageDirectory 
 let mobile: Target = haveLocal
     ? .binaryTarget(name: "TailPocketMobile", path: localFramework)
     : .binaryTarget(name: "TailPocketMobile",
-                    url: "https://github.com/jt-wang/tailpocket/releases/download/v0.3.3/TailPocketMobile.xcframework.zip",
-                    checksum: "556bcb5b866eba1fbc8ec2572ed8b4a5b0173d22b5f266b78ff75232766e325b")
+                    url: "https://github.com/jt-wang/tailpocket/releases/download/v0.3.4/TailPocketMobile.xcframework.zip",
+                    checksum: "f2ed61a2efc2ccff888c6dc23c61dae9c007d0e34669db4c8d7da7b9108d2c39")
 
 let package = Package(
     name: "TailPocket",

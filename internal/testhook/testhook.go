@@ -14,3 +14,6 @@ var NoUpgrade atomic.Bool
 // TailcatStarts counts every Tailcat server and client this module creates, host and phone side, so
 // a test can show a configuration without Tailcat creates none.
 var TailcatStarts atomic.Int64
+
+// LastRoute, when set, replaces how long a phone's Dial waits on its last route (connectphone).
+var LastRoute atomic.Int64 // time.Duration

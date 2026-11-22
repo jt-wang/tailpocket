@@ -324,6 +324,15 @@ next route. Phone libraries map: `bye unpaired` → revoked (delete the link), `
 `bye proto-mismatch` → mismatch, `bye busy` → unreachable, closed right after the first handshake
 message → handshake-closed (the host is down or pins another key), anything else → unreachable.
 
+Since v0.3.4 the phone also keeps, per session, why its last Dial failed (`Session.LastFailure`,
+`lastFailure()` in the SDKs): each route's outcome (`refused` for a lan TCP refusal, `no-host` for
+relay close code 4404, `relay-down` for any other relay refusal, `handshake-closed`, `no-answer` for
+the rest) and one reason for the user: `handshake-closed` or `refused` (a lan refusal only when no
+other route went unanswered) when something answered for the computer, `relay-down`, else `no-answer`.
+A Dial's last route is bounded by 30 s (before, only by the caller), so a network that drops packets
+ends in `no-answer` instead of a Dial that never returns. These are hints for the user, unauthenticated
+(SECURITY.md §6b).
+
 ## The local network: what the lan route protects against
 
 TailPocket has no unencrypted listener on the local network. `Config.Listen` serves only the Noise

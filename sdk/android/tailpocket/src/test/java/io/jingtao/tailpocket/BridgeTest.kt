@@ -42,6 +42,8 @@ class BridgeTest {
         override fun sync(handle: Long, timeoutMs: Long) = """{"address":"tcM","port":48931,"name":"Mac","key":"privkey:1","pk":"PK","via":[{"t":"relay","u":"wss://relay.example.com","r":"R"}]}"""
         override fun link(handle: Long) = sync(handle, 0)
         override fun path(handle: Long, timeoutMs: Long) = if (handle == 4L) """{"route":"relay","relay":"relay.example.com"}""" else """{"error":"revoked"}"""
+        var failure = "{}"
+        override fun lastFailure(handle: Long) = if (handle == 4L) failure else """{"error":"unknown-handle"}"""
     }
 
     private class MemoryStore : TailPocketLinkStore {
@@ -132,6 +134,22 @@ class BridgeTest {
         assertEquals("TOK", c["token"])
         call("tailPocket.disconnect", mapOf("handle" to c["handle"]))
         assertEquals(4L, native.stopped)
+    }
+
+    // v0.3.4: tailPocket.lastFailure is the code, time and route of the last failed attempt, or null.
+    @Test fun lastFailure() = runTest {
+        @Suppress("UNCHECKED_CAST")
+        val c = call("tailPocket.connect", mapOf("link" to mapOf("address" to "tcM", "port" to 48931, "name" to "Mac", "key" to "privkey:1"))) as Map<String, Any?>
+        val h = mapOf("handle" to c["handle"])
+        assertNull(call("tailPocket.lastFailure", h))
+        native.failure = """{"code":"handshake-closed","at":1795300000000,"route":"lan"}"""
+        assertEquals(mapOf("code" to "handshake-closed", "at" to 1795300000000L, "route" to "lan"), call("tailPocket.lastFailure", h))
+        native.failure = """{"code":"unreachable","at":1795300000001,"route":"relay"}"""
+        @Suppress("UNCHECKED_CAST")
+        assertEquals("unreachable", (call("tailPocket.lastFailure", h) as Map<String, Any?>)["code"])
+        native.failure = "{}"
+        assertNull(call("tailPocket.lastFailure", h))
+        try { call("tailPocket.lastFailure", mapOf("handle" to 99)); fail() } catch (e: TailPocketException) { assertEquals("unknown-handle", e.code) }
     }
 
     @Test fun nearbyEmitsNamesAndLocalPairingUsesThem() = runTest {

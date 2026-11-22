@@ -120,6 +120,43 @@ public struct TailPocketPath: Codable, Sendable, Equatable {
     public let relayHost: String?
 }
 
+/// Why the last connection attempt through a `TailPocketConnection` failed (v0.3.4). `reason` is what to
+/// tell the user:
+/// - "refused" or "handshake-closed": something answered for the computer and did not take this phone (your
+///   relay has no computer in its room, the computer's address refused it, or it closed the encrypted
+///   handshake). TailPocket is not running there, or the computer was reset: open it, or pair again.
+/// - "no-answer": no route answered. The computer is off or asleep, or this network blocks it (a plane's Wi-Fi).
+/// - "relay-down": your relay answered but would not carry the phone, and nothing else answered.
+/// - "": `code` says it ("revoked", "unauthorized", "mismatch"), or no route was tried.
+///
+/// `code` is the code the other calls use; `route` decided `reason`; `routes` is every route tried, `r` one
+/// of "refused", "no-host", "handshake-closed", "relay-down", "no-answer". None of it is authenticated (only
+/// "revoked" comes from the computer itself): anyone on the network can refuse a connection or pose as the
+/// relay. Use it for the message the user sees; never delete the link or its pinned key because of it.
+public struct TailPocketDialFailure: Codable, Sendable, Equatable {
+    public struct Route: Codable, Sendable, Equatable {
+        public let t: String
+        public let r: String
+        public init(t: String, r: String) { self.t = t; self.r = r }
+    }
+    public let code: String
+    public let reason: String
+    public let route: String
+    public let routes: [Route]
+    /// Milliseconds since 1970.
+    public let at: Int64
+    public var date: Date { Date(timeIntervalSince1970: Double(at) / 1000) }
+
+    public init(code: String, reason: String, route: String, routes: [Route], at: Int64) {
+        self.code = code; self.reason = reason; self.route = route; self.routes = routes; self.at = at
+    }
+
+    /// The Go library's answer: nil for "{}" (nothing failed since the last connection that worked).
+    static func parse(_ text: String) throws -> TailPocketDialFailure? {
+        text == "{}" ? nil : try TailPocket.decode(text)
+    }
+}
+
 /// A failure with a fixed code: invalid-invite, invalid-key, invalid-link, expired, unauthorized
 /// (after the pairing emoji: the computer's user said no or the code was spent; show a new code there),
 /// taken, unreachable, revoked, mismatch, handshake-closed, denied, local-failed, cancelled, timeout,
@@ -170,6 +207,11 @@ public final class TailPocketConnection: @unchecked Sendable {
         let handle = self.handle
         return try await TailPocket.blocking(cancel: {}) { ConnectmobilePath(handle, Int(timeout * 1000)) }
     }
+
+    /// Why the last connection attempt failed, or nil when none failed since the last one that worked. The
+    /// forward only closes a connection whose attempt failed, so your HTTP client sees a dropped
+    /// connection; read this then to tell the user why. Throws "unknown-handle" after `close`.
+    public func lastFailure() throws -> TailPocketDialFailure? { try TailPocketDialFailure.parse(ConnectmobileLastFailure(handle)) }
 
     public func close() {
         lock.lock(); defer { lock.unlock() }
