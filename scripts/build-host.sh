@@ -3,6 +3,9 @@
 # Usage: scripts/build-host.sh [goos-goarch ...]   (default: all five)
 set -eu
 cd "$(dirname "$0")/.."
+# The toolchain go.mod names, also when a newer Go is installed: the files then match the release.
+GOTOOLCHAIN=$(awk '$1 == "toolchain" {print $2}' go.mod)
+export GOTOOLCHAIN
 targets="${*:-darwin-arm64 darwin-amd64 linux-amd64 linux-arm64 windows-amd64}"
 mkdir -p sdk/node/bin build
 for t in $targets; do

@@ -40,14 +40,15 @@ import (
 )
 
 // Version is the library version the phone sends in its encrypted hello.
-const Version = "0.3.5"
+const Version = "0.3.6"
 
 // ErrRevoked: the host said, encrypted, that this phone is no longer paired. Pair again.
 var ErrRevoked = errors.New("connectphone: the host no longer has this phone paired")
 
 // perRoute bounds one route's attempt while others are left to try; the last route has the caller's
-// context (Session.Forward bounds a whole Dial with max(20 s, routes × perRoute)). lanDial bounds each
-// lan address.
+// context (Session.Forward bounds a whole Dial with max(20 s, routes × perRoute)), and each route ends by
+// itself as well: lan and Tailcat after 10 s, a relay's upgrade after connectrelay.PhoneUpgradeTimeout.
+// lanDial bounds each lan address.
 // After a Dial, the session looks for a better route in the background (Session.upgrade), each for
 // at most upgradeTry, once per upgradeRetry.
 const (
@@ -123,7 +124,7 @@ type Session struct {
 	failure *DialFailure // the last Dial that failed, nil after one succeeds
 }
 
-// DialFailure is why the last Dial of a Session failed (v0.3.5), when, and how each route ended. A
+// DialFailure is why the last Dial of a Session failed (v0.3.4), when, and how each route ended. A
 // Dial that succeeds clears it. Err is what Dial returned (errors.Is works: ErrUnreachable,
 // connectsecure.ErrHandshakeClosed, ErrRevoked, ...). Route is the route type that decided Reason
 // ("lan", "relay", "tailcat"; "" when no route was tried).

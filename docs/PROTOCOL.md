@@ -338,7 +338,8 @@ How long a failing Dial takes: each route but the last is bounded by 10 s, and t
 has since v0.3.0. Within that, a lan address that never answers ends after 10 s (the Noise handshake's
 own limit), a Tailcat route to a computer that never answers after 10 s (Tailcat's ping), and a relay
 that never answers when the forward's bound ends (20 s with one route). A direct `Session.Dial` call
-without a deadline has only the caller's context on its last route.
+without a deadline ends too: lan and Tailcat by their own 10 s, a relay's WebSocket upgrade after 20 s
+(since v0.3.6; before, a relay that never answered held such a Dial until the caller's context ended).
 
 ## The local network: what the lan route protects against
 

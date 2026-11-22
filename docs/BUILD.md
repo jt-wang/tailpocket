@@ -24,21 +24,35 @@ every other release file into `dist/release/` from that commit.
 
 ## Check a release
 
-The Go programs (`tailpocket-host-*`, `tailpocket-phone-*`, `tailpocket-relay-*`) and the npm packages that carry
-them (`tailpocket-node.tgz`, `tailpocket-client.tgz`) rebuild byte for byte from the release's tag, since v0.3.5.
-They are built with `-trimpath` and `-buildvcs=false`, so they record no path and no commit, only the source; a
-clone of the tag and a source download give the same files. With Go 1.27.4 and Node 20 or newer:
+The Go programs (`tailpocket-host-*`, `tailpocket-phone-*`, `tailpocket-relay-*`) rebuild byte for byte from the
+release's tag, since v0.3.5. They are built with `-trimpath` and `-buildvcs=false`, so they record no path and no
+commit, only the source; a clone of the tag and a source download give the same files. The build scripts use the Go
+toolchain `go.mod` names (`toolchain` line, go1.27.4), also when another Go is installed. With Node 20 or newer:
 
 ```sh
-git clone --branch v0.3.5 https://github.com/jt-wang/tailpocket && cd tailpocket
-GOTOOLCHAIN=go1.27.4 ./scripts/build-release.sh verify 0.3.5
+git clone --branch v0.3.6 https://github.com/jt-wang/tailpocket && cd tailpocket
+./scripts/build-release.sh verify 0.3.6
 ```
 
 It downloads the release's `SHA256SUMS`, rebuilds those files into `dist/verify/` and says `same` or `DIFFERENT` for
-each. `go version -m <file>` shows what a program was built with. The Apple framework
-(`TailPocketMobile.xcframework.zip`) and the Android libraries (`tailpocket-android-m2.zip`) are not reproducible
-this way: gomobile, the C toolchains and Gradle record build times and paths (the framework's Info.plist carries a
-build timestamp). Their sha256 is in `SHA256SUMS`, and `Package.swift` pins the framework's checksum. Releases
+each. `go version -m <file>` shows what a program was built with.
+
+The npm packages that carry them (`tailpocket-node.tgz`, `tailpocket-client.tgz`) hold the same tar, but the gzip
+around it depends on the zlib Node was built with: Node from nodejs.org bundles its own, Node from Homebrew or a Linux
+distribution may use the system's, and the same tar then compresses to other bytes. So `verify` downloads both
+packages, checks them against `SHA256SUMS`, and compares the unzipped tar (`same … (tar)`). Releases are packed with
+Node from nodejs.org since v0.3.6; v0.3.5's were packed with Homebrew's (system zlib 1.2.12), so with another Node
+only the unzipped tar matches.
+
+The Android library `tailpocket-mobile.aar` (the Go code, built by gomobile) also rebuilds byte for byte, with the
+Android SDK and NDK installed: `./scripts/build-mobile.sh android` gives `build/android/tailpocket-mobile.aar`; compare
+it with `io/jingtao/tailpocket/tailpocket-mobile/<version>/tailpocket-mobile-<version>.aar` inside
+`tailpocket-android-m2.zip`. The m2 zip as a whole differs from build to build: Gradle writes the publish time into
+each `maven-metadata.xml` (and its checksum files), and the zip records file times. The AARs and POMs in it, the
+Kotlin libraries' included, were the same in two builds of v0.3.6. The Apple framework (`TailPocketMobile.xcframework.zip`) is not reproducible either:
+its Info.plist carries a build timestamp. Their sha256 is in `SHA256SUMS`, and `Package.swift` pins the framework's
+checksum. The release script fails unless every Go program, every `.so` in the AAR and every framework binary is
+built with the toolchain `go.mod` names; v0.3.3 to v0.3.5 shipped phone libraries built with go1.27.1. Releases
 before v0.3.5 recorded this repository's private commit (`vcs.revision`) and cannot be rebuilt from the public tag
 byte for byte.
 

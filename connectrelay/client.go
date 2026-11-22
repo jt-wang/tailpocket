@@ -219,7 +219,11 @@ func DialPhone(ctx context.Context, relayURL, room string, client *http.Client) 
 	if err != nil {
 		return nil, err
 	}
-	c, resp, err := websocket.Dial(ctx, u, dialOptions(nil, client))
+	// A relay that takes the connection and never answers the upgrade ends here, as in Session.Forward,
+	// also when the caller's context has no deadline (v0.3.6). The bound covers the upgrade only.
+	dctx, cancel := context.WithTimeout(ctx, PhoneUpgradeTimeout)
+	defer cancel()
+	c, resp, err := websocket.Dial(dctx, u, dialOptions(nil, client))
 	if err != nil {
 		if resp != nil {
 			return nil, fmt.Errorf("%w: %w: %s answered %d", ErrUnreachable, ErrRelayAnswered, NormalizeHost(relayURL), resp.StatusCode)
@@ -228,6 +232,10 @@ func DialPhone(ctx context.Context, relayURL, room string, client *http.Client) 
 	}
 	return netConn(c, relayURL), nil
 }
+
+// PhoneUpgradeTimeout bounds DialPhone's WebSocket upgrade: the 20 s Session.Forward gives a one-route
+// Dial.
+const PhoneUpgradeTimeout = 20 * time.Second
 
 // ErrUnreachable wraps every failure DialPhone and a phone's relay connection report, close codes
 // included: they are not encrypted, so anyone on the path can send one, and none of them means the

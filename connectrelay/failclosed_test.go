@@ -254,9 +254,12 @@ func (c *countConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// Write counts the bytes before they leave: counted after, a busy machine could let the relay's answer
+// arrive and the test read the counters while the request is not yet counted.
 func (c *countConn) Write(p []byte) (int, error) {
+	c.c.out.Add(int64(len(p)))
 	n, err := c.Conn.Write(p)
-	c.c.out.Add(int64(n))
+	c.c.out.Add(int64(n - len(p)))
 	return n, err
 }
 

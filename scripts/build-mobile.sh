@@ -5,6 +5,11 @@
 # Usage: scripts/build-mobile.sh [apple] [android]
 set -eu
 cd "$(dirname "$0")/.."
+# gomobile builds through a temporary gobind module whose go.mod has no toolchain line, so without
+# this the libraries were built with the go line's minimum (go1.27.1 in v0.3.3 to v0.3.5), not the
+# toolchain go.mod names. Pin it for every go command, gomobile's included.
+GOTOOLCHAIN=$(awk '$1 == "toolchain" {print $2}' go.mod)
+export GOTOOLCHAIN
 mkdir -p .dev/bin build/apple build/android
 go build -o .dev/bin/gomobile golang.org/x/mobile/cmd/gomobile
 go build -o .dev/bin/gobind golang.org/x/mobile/cmd/gobind
@@ -43,13 +48,13 @@ for target in ${*:-apple android}; do
       -o build/android/tailpocket-mobile.aar ./connectmobile
     check_paths build/android/tailpocket-mobile.aar
     # A local Maven repository, so the Android library modules can depend on it like any artifact.
-    m2=build/android/m2/io/jingtao/tailpocket/tailpocket-mobile/0.3.5
+    m2=build/android/m2/io/jingtao/tailpocket/tailpocket-mobile/0.3.6
     mkdir -p "$m2"
-    cp build/android/tailpocket-mobile.aar "$m2/tailpocket-mobile-0.3.5.aar"
+    cp build/android/tailpocket-mobile.aar "$m2/tailpocket-mobile-0.3.6.aar"
     printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
       '<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion>' \
-      '<groupId>io.jingtao.tailpocket</groupId><artifactId>tailpocket-mobile</artifactId><version>0.3.5</version>' \
-      '<packaging>aar</packaging></project>' > "$m2/tailpocket-mobile-0.3.5.pom"
+      '<groupId>io.jingtao.tailpocket</groupId><artifactId>tailpocket-mobile</artifactId><version>0.3.6</version>' \
+      '<packaging>aar</packaging></project>' > "$m2/tailpocket-mobile-0.3.6.pom"
     ;;
   esac
   echo "built $target"
