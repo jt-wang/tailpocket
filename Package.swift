@@ -9,8 +9,8 @@ let haveLocal = FileManager.default.fileExists(atPath: Context.packageDirectory 
 let mobile: Target = haveLocal
     ? .binaryTarget(name: "TailPocketMobile", path: localFramework)
     : .binaryTarget(name: "TailPocketMobile",
-                    url: "https://github.com/jt-wang/tailpocket/releases/download/v0.3.6/TailPocketMobile.xcframework.zip",
-                    checksum: "625cffcab770a903fd3d6b72a8b74801005bc785a2310d9dc1b357cc943e3464")
+                    url: "https://github.com/jt-wang/tailpocket/releases/download/v0.4.0/TailPocketMobile.xcframework.zip",
+                    checksum: "a4d4acb44c723ebb928de8d7516821d13d96e69aad4f9a846a6a28870628322b")
 
 let package = Package(
     name: "TailPocket",
@@ -18,12 +18,18 @@ let package = Package(
     products: [
         .library(name: "TailPocket", targets: ["TailPocket"]),
         .library(name: "TailPocketUI", targets: ["TailPocketUI"]),
+        // Opens push notes in a Notification Service Extension, without the Go framework (docs/PUSH.md §3).
+        .library(name: "TailPocketPush", targets: ["TailPocketPush"]),
     ],
     targets: [
         mobile,
-        .target(name: "TailPocket", dependencies: ["TailPocketMobile"], path: "sdk/apple/Sources/TailPocket",
+        .target(name: "TailPocketPush", path: "sdk/apple/Sources/TailPocketPush", linkerSettings: [.linkedFramework("Security")]),
+        .target(name: "TailPocket", dependencies: ["TailPocketMobile", "TailPocketPush"], path: "sdk/apple/Sources/TailPocket",
                 linkerSettings: [.linkedFramework("Security"), .linkedFramework("Network"), .linkedLibrary("resolv")]),
         .target(name: "TailPocketUI", dependencies: ["TailPocket"], path: "sdk/apple/Sources/TailPocketUI"),
         .testTarget(name: "TailPocketTests", dependencies: ["TailPocket"], path: "sdk/apple/Tests/TailPocketTests"),
+        .testTarget(name: "TailPocketUITests", dependencies: ["TailPocketUI"], path: "sdk/apple/Tests/TailPocketUITests"),
+        // Reads connectpush/testdata/vectors.json from the checkout.
+        .testTarget(name: "TailPocketPushTests", dependencies: ["TailPocketPush"], path: "sdk/apple/Tests/TailPocketPushTests"),
     ]
 )

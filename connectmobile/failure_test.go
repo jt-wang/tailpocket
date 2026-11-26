@@ -1,8 +1,10 @@
 package connectmobile
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -376,5 +378,143 @@ func TestLastFailureFixture(t *testing.T) {
 	}
 	if strings.TrimSpace(string(want)) != string(body) {
 		t.Fatalf("LastFailure:\n%s\ntestdata/lastfailure.json:\n%s", body, want)
+	}
+}
+
+// pairedLAN pairs a phone with a LAN-only computer on a free loopback address and opens it with
+// Connect, as an app does. It returns the host, the opened handle, and the phone's public key.
+// sessions counts the computer's open encrypted sessions (conn-open minus conn-close).
+func pairedLAN(t *testing.T) (h *connecthost.Host, handle int64, port int, base, pub string, sessions func() int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	var mu sync.Mutex
+	open := 0
+	h, err = connecthost.New(connecthost.Config{Name: "Mac", Routes: []string{connecthost.RouteLAN}, Listen: []string{addr},
+		Save: func(connecthost.State) error { return nil },
+		Audit: func(e connecthost.Event) {
+			mu.Lock()
+			defer mu.Unlock()
+			switch e.Kind {
+			case connecthost.EventConnOpen:
+				open++
+			case connecthost.EventConnClose:
+				open--
+			}
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok") })}
+	go srv.Serve(h.Listener())
+	t.Cleanup(func() { srv.Close(); _ = h.Close() })
+	sessions = func() int { mu.Lock(); defer mu.Unlock(); return open }
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	p, err := h.Pair(ctx, connecthost.PairOptions{Confirm: func(context.Context, connecthost.PairRequest) bool { return true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, err := connectphone.PairV2(ctx, p.InviteV2(), connectphone.NewKey(), connectphone.Options{OnSAS: func([]string) {}, Routes: []string{"lan"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _ = connectphone.PublicKey(link.Key)
+	text, _ := link.Encode()
+	var opened struct {
+		Handle int64  `json:"handle"`
+		Port   int    `json:"port"`
+		Base   string `json:"base"`
+	}
+	if err := json.Unmarshal([]byte(Connect(text, "")), &opened); err != nil || opened.Handle == 0 {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { Stop(opened.Handle) })
+	return h, opened.Handle, opened.Port, opened.Base, pub, sessions
+}
+
+// WANG-91: the one failure the computer says itself. After a revoke, LastFailure's code is
+// "revoked" and reason "" (code says it), so the app tells the user this phone was removed rather
+// than "the computer is off".
+func TestLastFailureRevoked(t *testing.T) {
+	h, handle, port, base, pub, _ := pairedLAN(t)
+	if err := fetch(port, base); err != nil {
+		t.Fatalf("paired phone: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := h.Revoke(ctx, pub); err != nil {
+		t.Fatal(err)
+	}
+	var f failure
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if fetchWithin(port, base, 3*time.Second) == nil {
+			t.Fatal("a revoked phone fetched")
+		}
+		if f = lastFailure(t, handle); f.Code == "revoked" {
+			break
+		}
+	}
+	if f.Code != "revoked" || f.Reason != "" {
+		t.Fatalf("after revoke: %+v, want code revoked, reason empty", f)
+	}
+}
+
+// WANG-91: Stop closes the forward before the session, and cuts a connection the app still has
+// open through it (a kept-alive HTTP connection), instead of leaving it hanging until a timeout;
+// and the computer sees the phone's encrypted session end.
+func TestStopCutsOpenForwardedConnections(t *testing.T) {
+	_, handle, port, base, _, sessions := pairedLAN(t)
+	c, err := net.Dial("tcp", "127.0.0.1:"+itoa(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	io.WriteString(c, "GET "+base+"/ HTTP/1.1\r\nHost: x\r\n\r\n") // keep-alive: the server keeps it open
+	r := bufio.NewReader(c)
+	resp, err := http.ReadResponse(r, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+	// The order: when Stop reaches the session, the app's connection is already cut. A session close
+	// alone does not cut it (the forward would hold it until the app's own timeout).
+	var cutFirst error
+	reached := false
+	closeSession = func(s *connectphone.Session) error {
+		reached = true
+		_ = c.SetReadDeadline(time.Now().Add(time.Second))
+		_, cutFirst = r.ReadByte()
+		return s.Close()
+	}
+	t.Cleanup(func() { closeSession = (*connectphone.Session).Close })
+	Stop(handle)
+	var ne net.Error
+	if !reached {
+		t.Fatal("Stop did not close the session")
+	}
+	if cutFirst == nil || errors.As(cutFirst, &ne) && ne.Timeout() {
+		t.Fatalf("the app's connection was still open when Stop closed the session: %v", cutFirst)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, err = r.ReadByte()
+	if err == nil || errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("open connection after Stop: %v, want it closed", err)
+	}
+	if got := LastFailure(handle); !strings.Contains(got, "unknown-handle") {
+		t.Fatalf("LastFailure after Stop: %s", got)
+	}
+	for deadline := time.Now().Add(5 * time.Second); sessions() != 0; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d encrypted session(s) still open on the computer after Stop", sessions())
+		}
 	}
 }

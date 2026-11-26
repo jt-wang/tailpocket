@@ -1,0 +1,160 @@
+# The slow half of TailPocket's regression suite: live Tailcat, relay-only with UDP really
+# blocked, macOS live and Bonjour, the iOS Simulator, the Android pairing screen on an emulator, the release-file checks, and the three apps built on
+# TailPocket (their public repositories, so no secret). It runs on the public repository only: every job
+# is skipped anywhere else. Each export to main starts it, and so does a CI trial pushed to the public ci
+# branch; to rerun before a release, start it on the pushed version tag (gh workflow run nightly.yml
+# --ref vX.Y.Z), not main. Every job must succeed.
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 18 * * *" # 03:00 in Tokyo
+  workflow_dispatch:
+  push:
+    branches: [main, ci] # each export, and each CI trial (public main untouched)
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+# No GOTOOLCHAIN=local here: with it set, setup-go reads go.mod's go line (1.27.1), not its toolchain line.
+# setup-go sets it itself once it has installed the toolchain.
+
+# pipefail in every step (shell: bash), so a test piped into tee still fails its step.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  live:
+    name: Go race suite, live Tailcat, relay-only with UDP blocked
+    if: github.repository == 'jt-wang/tailpocket'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with: { go-version-file: go.mod }
+      - name: The Go in use is go.mod's toolchain
+        run: test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" {print $2}' go.mod)"
+      - name: go test -race (every package)
+        run: go test -count=1 -race ./...
+      - name: Live over real Tailcat
+        run: TAILPOCKET_LIVE=1 go test -count=1 -timeout 8m -v ./e2e ./cmd/tailpocket-host
+      - name: Relay-only, UDP really blocked
+        run: |
+          scripts/e2e-udp-block.sh on
+          status=0
+          # TestLiveRelayOnly then accepts only a DERP route with its region: a direct route means UDP got through.
+          TAILPOCKET_LIVE=1 TAILPOCKET_EXPECT_DERP=1 go test -count=1 -timeout 8m -skip TestLiveSameWiFiPairing -v ./e2e ./cmd/tailpocket-host || status=$?
+          scripts/e2e-udp-block.sh off
+          [ "$(sudo iptables -S | grep -c udp || true)" = 0 ] || { echo "UDP block left in place"; exit 1; }
+          exit $status
+      - name: Without Tailcat, nothing leaves the machine (iptables packet count, with a Tailcat control)
+        run: scripts/e2e-no-tailcat.sh
+
+  compat:
+    name: The last release's host and phone against this tree, both ways
+    if: github.repository == 'jt-wang/tailpocket'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with: { go-version-file: go.mod }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: 24 }
+      - run: scripts/e2e-compat.sh
+
+  android-device:
+    name: Android pairing screen on an emulator (keyboard, small screen, large text)
+    if: github.repository == 'jt-wang/tailpocket'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with: { go-version-file: go.mod }
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with: { distribution: temurin, java-version: "21" }
+      - name: Let the emulator use KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - run: scripts/build-mobile.sh android
+      - uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot-save
+          # Each line runs on its own. The soft keyboard must show although the emulator reports a hardware one.
+          script: |
+            adb shell settings put secure show_ime_with_hard_keyboard 1
+            cd sdk/android && ./gradlew --no-daemon :tailpocket-ui:connectedDebugAndroidTest
+
+  release-checks:
+    name: Release files (3 framework binaries, phone libraries' Go version, checksums)
+    if: github.repository == 'jt-wang/tailpocket'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with: { go-version-file: go.mod }
+      - run: sh scripts/build-release-test.sh
+
+  apple:
+    name: Swift unit and macOS live tests, Bonjour, the iOS Simulator end to end
+    if: github.repository == 'jt-wang/tailpocket'
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with: { go-version-file: go.mod }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: 24 }
+      - name: Build the helper and the framework
+        run: |
+          scripts/build-host.sh "$(go env GOOS)-$(go env GOARCH)"
+          scripts/build-mobile.sh apple
+      - run: swift test --skip LiveTests --skip SimulatorLiveTests
+      - name: macOS live (real helper and Tailcat; pairing over Bonjour with NWBrowser)
+        run: TAILPOCKET_LIVE=1 swift test --filter 'TailPocketTests.LiveTests'
+      - name: Bonjour against the system's dns-sd (Darwin only)
+        run: |
+          go test -count=1 -v ./connectmdns | tee mdns.log
+          if grep -q 'NOT TESTED HERE' mdns.log; then echo "::warning::connectmdns multicast tests skipped: this runner may not send multicast"; fi
+      - name: iOS Simulator (QR over Tailcat, the bridge, relay only)
+        run: |
+          export TAILPOCKET_SIMULATOR="$(xcrun simctl list devices available | grep -m1 -oE 'iPhone [0-9A-Za-z ]+[0-9A-Za-z]' )"
+          echo "simulator: $TAILPOCKET_SIMULATOR"
+          scripts/e2e-apple.sh
+
+  downstream:
+    name: Herdr, DSH and Boop (public repositories) against this tree
+    if: github.repository == 'jt-wang/tailpocket'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { path: tailpocket }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { repository: jt-wang/herdr-anywhere, path: herdr-anywhere }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { repository: jt-wang/dsh-anywhere, path: dsh-anywhere }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { repository: jt-wang/boop, path: boop }
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with: { go-version-file: tailpocket/go.mod }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: 24 }
+      - run: tailpocket/scripts/smoke-downstream.sh

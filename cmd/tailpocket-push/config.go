@@ -30,6 +30,7 @@ type config struct {
 	Apps          []appConfig `json:"apps"`
 
 	trust []netip.Prefix
+	dir   string // the config file's directory
 }
 
 // oldKey is a retired handle key: handles made with it still open, new
@@ -48,9 +49,10 @@ type appConfig struct {
 	Attest          *attestConfig `json:"attest"`
 }
 
-// attestConfig turns on device attestation for register and revoke. Each
-// part is passed as it is to the verifier for that platform; this build
-// has none (see attest.go), so setting either stops the gateway at start.
+// attestConfig turns on device attestation for register and revoke: App
+// Attest for apns tokens (ios, appattest.go) and Play Integrity for fcm
+// tokens (android, playintegrity.go). A part that does not parse stops the
+// start.
 type attestConfig struct {
 	IOS     json.RawMessage `json:"ios"`
 	Android json.RawMessage `json:"android"`
@@ -111,6 +113,7 @@ func parseConfig(b []byte, dir string) (*config, error) {
 		}
 		return filepath.Join(dir, p)
 	}
+	c.dir = dir
 	if c.Listen == "" {
 		c.Listen = defaultListen
 	}

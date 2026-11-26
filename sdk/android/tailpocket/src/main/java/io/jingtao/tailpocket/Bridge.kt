@@ -41,7 +41,12 @@ class TailPocketBridge(
     /** Shows a QR scanner and returns the first invite text with one of the prefixes; null makes "tailPocket.scan" fail with "unsupported". */
     private val scanner: (suspend (prefixes: List<String>) -> String)? = null,
     private val emit: (event: String, data: Any?) -> Unit = { _, _ -> },
+    /** Push keys, seqs and generations; null makes the "tailPocket.push.*" names fail with "unsupported". */
+    private val pushStore: TailPocketPushStore? = null,
+    /** Play Integrity tokens, for apps whose gateway checks them. */
+    private val integrity: TailPocketIntegrityTokens? = null,
 ) {
+    private val pushPhone by lazy { pushStore?.let { TailPocketPushPhone(sdk, it, integrity) } }
     private var nearby: TailPocketNearbySource? = null
     /** Open connections, with the store slot their link came from (null for a link passed in). */
     private val connections = ConcurrentHashMap<Long, Pair<TailPocketConnection, String?>>()
@@ -150,6 +155,25 @@ class TailPocketBridge(
         },
         "tailPocket.store.link" to { a -> store.link(a.optString("slot") ?: "default")?.let { toValue(TailPocketHostLink.serializer(), it) } },
         "tailPocket.store.deleteLink" to { a -> store.deleteLink(a.optString("slot") ?: "default"); null },
+        // Push (docs/PUSH.md §1). Push keys stay in native storage; JavaScript sees only key ids.
+        "tailPocket.push.register" to { a ->
+            toValue(TailPocketPushRegistration.serializer(), push().register(a.string("gateway"), a.string("app"), a.string("token"), a.optString("platform") ?: "fcm", a.long("timeoutMs") ?: 30_000))
+        },
+        "tailPocket.push.give" to { a ->
+            val reg = TailPocketPushRegistration(a.string("pushHandle"), a.long("expires") ?: 0)
+            mapOf("kid" to push().give(connection(a).first, a.string("gateway"), a.string("app"), reg, a.long("timeoutMs") ?: 30_000))
+        },
+        "tailPocket.push.revoke" to { a ->
+            toValue(TailPocketPushRegistration.serializer(), push().revoke(a.string("gateway"), a.string("app"), a.string("token"), a.optString("kid"),
+                a.optString("platform") ?: "fcm", a.long("timeoutMs") ?: 30_000))
+        },
+        "tailPocket.push.clear" to { a ->
+            val p = push()
+            connection(a).first.clearPush(a.long("timeoutMs") ?: 30_000)
+            a.optString("kid")?.let { p.forget(it) }
+            null
+        },
+        "tailPocket.push.forget" to { a -> push().forget(a.string("kid")); null },
     )
 
     /** Every function name this bridge answers. */
@@ -169,6 +193,8 @@ class TailPocketBridge(
         pending.clear()
     }
 
+    private fun push() = pushPhone ?: throw TailPocketException("unsupported")
+
     private fun connection(a: Map<String, Any?>) = connections[a.long("handle") ?: -1] ?: throw TailPocketException("unknown-handle")
 
     companion object {
@@ -178,12 +204,15 @@ class TailPocketBridge(
             "tailPocket.nearby.start", "tailPocket.nearby.stop", "tailPocket.local.begin", "tailPocket.local.finish", "tailPocket.local.cancel", "tailPocket.scan",
             "tailPocket.store.phoneKey", "tailPocket.store.saveLink", "tailPocket.store.link", "tailPocket.store.deleteLink",
             "tailPocket.setTailcatOnly", "tailPocket.setRoutes",
+            "tailPocket.push.register", "tailPocket.push.give", "tailPocket.push.revoke", "tailPocket.push.clear", "tailPocket.push.forget",
         )
 
-        /** A bridge with the Keystore store and NsdManager discovery. */
-        fun create(context: Context, scanner: (suspend (List<String>) -> String)? = null, emit: (String, Any?) -> Unit): TailPocketBridge {
+        /** A bridge with the Keystore stores and NsdManager discovery. */
+        fun create(context: Context, scanner: (suspend (List<String>) -> String)? = null, integrity: TailPocketIntegrityTokens? = null,
+                   emit: (String, Any?) -> Unit): TailPocketBridge {
             val app = context.applicationContext
-            return TailPocketBridge(TailPocket.default, TailPocketKeystoreStore(app), { service -> NsdSource(TailPocketNearbyHosts(app, service)) }, scanner, emit)
+            return TailPocketBridge(TailPocket.default, TailPocketKeystoreStore(app), { service -> NsdSource(TailPocketNearbyHosts(app, service)) }, scanner, emit,
+                TailPocketKeystorePushStore(app), integrity)
         }
     }
 }

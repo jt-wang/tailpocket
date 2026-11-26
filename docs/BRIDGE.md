@@ -10,7 +10,10 @@ Failures reject with a code: `invalid-arguments`, `invalid-invite`, `invalid-key
 `expired`, `unauthorized` (after the pairing emoji: the computer's user said no or the code was spent; show a
 new code on the computer), `unreachable`, `revoked` (the computer removed this phone: delete its link), `mismatch`,
 `handshake-closed`, `unknown-handle`, `denied`, `local-failed`, `not-paired`, `unsupported`, `cancelled`,
-`unknown-function`, `unknown-operation`, `nearby-not-started`, `failed`.
+`unknown-function`, `unknown-operation`, `nearby-not-started`, `failed`; for `tailPocket.push.*` also those of
+[PUSH.md](PUSH.md) §1 (`stale-generation`, `attestation-required`, …). On iOS the push names need a bridge made with
+`push:` (a `TailPocketPushPhone` with the app's Keychain group), else they fail `unsupported`; on Android
+`TailPocketBridge.create` keeps push keys in the Keystore store.
 
 | Name | Arguments | Result |
 |---|---|---|
@@ -38,6 +41,11 @@ new code on the computer), `unreachable`, `revoked` (the computer removed this p
 | `tailPocket.store.saveLink` | `link`, `slot?` | |
 | `tailPocket.store.link` | `slot?` | `TailPocketHostLink` or null |
 | `tailPocket.store.deleteLink` | `slot?` | |
+| `tailPocket.push.register` | `gateway`, `app`, `token` (APNs as hex, or FCM), `platform?` (iOS `apns`, Android `fcm`), `timeoutMs?` | `{handle, expires}`: registers at the stored generation, with attestation when the bridge has an attester ([PUSH.md](PUSH.md) §1) |
+| `tailPocket.push.give` | `handle` (a connection), `gateway`, `app`, `pushHandle`, `timeoutMs?` | `{kid}`: makes and stores a push key for that computer and gives it with the push handle over the session (`push-refused` with `reason`, `push-unsupported`) |
+| `tailPocket.push.revoke` | `gateway`, `app`, `token`, `kid?`, `platform?`, `timeoutMs?` | `{handle, expires}`: after removing a computer, revokes every handle, deletes `kid`'s key and registers at the next generation; give the new handle to the computers that stay |
+| `tailPocket.push.clear` | `handle` (a connection), `kid?`, `timeoutMs?` | ; the computer forgets the push target, and `kid`'s key is deleted |
+| `tailPocket.push.forget` | `kid` | ; deletes a computer's push key |
 
 Events:
 

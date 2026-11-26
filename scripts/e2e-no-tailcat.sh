@@ -28,11 +28,17 @@ reset() {
 }
 trap 'reset off' EXIT
 reset
-(cd /tmp && sudo -u $user env HOME=/tmp "$bin" -test.count=1 -test.v -test.run 'TestNoTailcat') | grep -E '^(---|ok|FAIL|PASS)|_test.go'
+# The tests must pass too: a failing run that sends nothing proves nothing.
+log=$(dirname "$bin")/run.log
+(cd /tmp && sudo -u $user env HOME=/tmp "$bin" -test.count=1 -test.v -test.run 'TestNoTailcat') > "$log" 2>&1 || {
+  cat "$log"; echo "FAIL: the no-Tailcat tests failed"; exit 1; }
+grep -E '^(---|ok|FAIL|PASS)|_test.go' "$log"
 n=$(count); echo "no-Tailcat run: $n packets off loopback"
 [ "$n" -eq 0 ] || { echo "FAIL: the no-Tailcat run sent packets off the machine"; exit 1; }
 reset
-(cd /tmp && sudo -u $user env HOME=/tmp TAILPOCKET_LIVE=1 "$bin" -test.count=1 -test.run 'TestLiveQRPairConnectRestartRevoke' -test.timeout 5m) | tail -1
+(cd /tmp && sudo -u $user env HOME=/tmp TAILPOCKET_LIVE=1 "$bin" -test.count=1 -test.run 'TestLiveQRPairConnectRestartRevoke' -test.timeout 5m) > "$log" 2>&1 || {
+  cat "$log"; echo "FAIL: the Tailcat control run failed"; exit 1; }
+tail -1 "$log"
 c=$(count); echo "control run with Tailcat: $c packets off loopback"
 [ "$c" -gt 0 ] || { echo "FAIL: the control sent nothing, so the count proves nothing"; exit 1; }
 echo PASS

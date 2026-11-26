@@ -38,7 +38,7 @@ const (
 )
 
 // Version is the library version the host sends in its encrypted hello.
-const Version = "0.3.6"
+const Version = "0.4.0"
 
 // maxSessionsPerPhone: a fifth session from one phone closes its oldest with bye busy.
 const maxSessionsPerPhone = 4
@@ -364,7 +364,7 @@ func (h *Host) serveSession(c net.Conn, route string, limit *connectsecure.Limit
 		h.record(Event{Kind: EventConnClose, Phone: phone, Route: route})
 	}()
 	_ = s.Control().Send(routesMsg{Type: "routes", Via: routes})
-	go drainControl(s)
+	go h.readControl(s, k)
 	for {
 		st, err := s.AcceptStream()
 		if err != nil {
@@ -390,14 +390,13 @@ type routesMsg struct {
 	Via  []connectinvite.Route `json:"via"`
 }
 
-// drainControl reads what the phone sends on the control stream, so its queue never fills. Nothing
-// a phone sends there needs an answer yet.
-func drainControl(s *connectsecure.Session) {
-	for {
-		if _, err := s.Control().Recv(); err != nil {
-			return
-		}
+// remarshal turns a control message into v.
+func remarshal(m map[string]any, v any) error {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
 	}
+	return json.Unmarshal(b, v)
 }
 
 // excessSessionLocked returns phone's oldest session once it has more than maxSessionsPerPhone.
@@ -567,7 +566,8 @@ type syncReply struct {
 }
 
 // serveControl answers POST /v2/sync from paired phones on Tailcat: it records the phone's Noise
-// key (the connection proves the phone holds its nodekey) and returns the host's key and routes.
+// key (the connection proves the phone holds its nodekey) and returns the host's key and routes. It
+// also takes the phone's push target, POST /v2/push (push.go).
 func (h *Host) serveControl() {
 	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 8 << 10,
 		Handler: http.HandlerFunc(h.handleControl),
@@ -587,7 +587,8 @@ func (h *Host) handleControl(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
-	if r.URL.EscapedPath() != "/v2/sync" || r.URL.RawQuery != "" {
+	path := r.URL.EscapedPath()
+	if (path != "/v2/sync" && path != "/v2/push") || r.URL.RawQuery != "" {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -598,6 +599,25 @@ func (h *Host) handleControl(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil || len(body) > maxBody {
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		return
+	}
+	if path == "/v2/push" {
+		var q pushRequest
+		if json.Unmarshal(body, &q) != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch err := q.apply(h, k); {
+		case err == nil:
+			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		case errors.Is(err, errPushOff), errors.Is(err, errPushInvalid), errors.Is(err, errPushGateway):
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": pushCode(err)})
+		default:
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed"})
+		}
 		return
 	}
 	var req syncRequest

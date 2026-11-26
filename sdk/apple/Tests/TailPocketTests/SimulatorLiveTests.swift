@@ -37,8 +37,12 @@ final class SimulatorLiveTests: XCTestCase {
         let paired = try await TailPocket.pair(relayOnly, phoneKey: TailPocket.newKey(), device: "iOS relay") { shown = $0 }
         XCTAssertEqual(shown.count, 4)
         XCTAssertEqual(paired.payload, "welcome")
+        // The host also hands back its LAN routes (LAN by default), and a link with them moves to LAN:
+        // keep only the relay, so this fetch can only go over it.
+        let relayRoutes = (paired.via ?? []).filter { $0.t == "relay" }
+        XCTAssertEqual(relayRoutes.count, 1)
         let link = TailPocketHostLink(address: "", port: 0, name: paired.name, payload: paired.payload, key: paired.key,
-                                      hostKey: paired.hostKey, via: paired.via)
+                                      hostKey: paired.hostKey, via: relayRoutes)
         let connection = try TailPocket.connect(link)
         defer { connection.close() }
         var body = ""

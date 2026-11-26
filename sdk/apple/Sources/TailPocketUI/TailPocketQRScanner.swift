@@ -8,6 +8,8 @@ import TailPocket
 @available(iOS 16.0, *)
 public struct TailPocketQRScanner: UIViewControllerRepresentable {
     public static var isAvailable: Bool { DataScannerViewController.isSupported && DataScannerViewController.isAvailable }
+    /// Whether this device can scan at all, whatever the camera permission.
+    public static var isSupported: Bool { DataScannerViewController.isSupported }
 
     private let prefixes: [String]
     private let onInvite: (String) -> Void
@@ -39,19 +41,17 @@ public struct TailPocketQRScanner: UIViewControllerRepresentable {
     public func makeCoordinator() -> Coordinator { Coordinator(prefixes: prefixes, onInvite: onInvite) }
 
     public final class Coordinator: NSObject, DataScannerViewControllerDelegate {
-        let prefixes: [String]
+        var filter: ScanFilter
         let onInvite: (String) -> Void
-        var reported = false
 
-        init(prefixes: [String], onInvite: @escaping (String) -> Void) { self.prefixes = prefixes; self.onInvite = onInvite }
+        init(prefixes: [String], onInvite: @escaping (String) -> Void) { filter = ScanFilter(prefixes: prefixes); self.onInvite = onInvite }
 
         public func dataScanner(_ scanner: DataScannerViewController, didAdd items: [RecognizedItem], allItems: [RecognizedItem]) {
-            for item in items {
-                guard !reported, case let .barcode(code) = item, let text = code.payloadStringValue,
-                      let invite = TailPocket.inviteText(in: text, prefixes: prefixes) else { continue }
-                reported = true
-                onInvite(invite)
+            let payloads = items.map { item -> String? in
+                if case let .barcode(code) = item { return code.payloadStringValue }
+                return nil
             }
+            if let invite = filter.take(payloads) { onInvite(invite) }
         }
     }
 }

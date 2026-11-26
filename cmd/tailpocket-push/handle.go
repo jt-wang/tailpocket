@@ -81,6 +81,7 @@ type handleKeys struct {
 	current byte
 	aeads   map[byte]cipher.AEAD
 	srcKey  []byte
+	chKey   []byte // challenges for attestation
 }
 
 func platName(p byte) string {
@@ -244,6 +245,9 @@ func loadHandleKeys(c *config, warn func(string, ...any)) (*handleKeys, error) {
 	m := hmac.New(sha256.New, key)
 	m.Write([]byte("tailpocket push source tag 1"))
 	k.srcKey = m.Sum(nil)
+	m = hmac.New(sha256.New, key)
+	m.Write([]byte("tailpocket push challenge key 1"))
+	k.chKey = m.Sum(nil)
 	for _, o := range c.OldHandleKeys {
 		b, err := os.ReadFile(o.File)
 		if err != nil {

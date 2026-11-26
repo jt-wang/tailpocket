@@ -36,6 +36,8 @@ type upstream struct {
 	apnsSandbox    string
 	fcm            string
 	oauth          string
+	// playIntegrity is dialed only for an app with attest.android set.
+	playIntegrity string
 }
 
 const (
@@ -47,6 +49,9 @@ const (
 	// send the gateway anywhere else either.
 	oauthURL = "https://oauth2.googleapis.com/token"
 	fcmScope = "https://www.googleapis.com/auth/firebase.messaging"
+	// playIntegrityURL is used only for apps with attest.android.
+	playIntegrityURL   = "https://playintegrity.googleapis.com"
+	playIntegrityScope = "https://www.googleapis.com/auth/playintegrity"
 
 	upstreamTimeout = 15 * time.Second
 	apnsJWTLife     = 50 * time.Minute
@@ -69,6 +74,7 @@ func defaultUpstream() upstream {
 		apnsSandbox:    apnsSandboxURL,
 		fcm:            fcmURL,
 		oauth:          oauthURL,
+		playIntegrity:  playIntegrityURL,
 	}
 }
 
@@ -243,11 +249,17 @@ func (s *apnsSender) send(ctx context.Context, hc *http.Client, now time.Time, p
 
 type fcmSender struct {
 	base    string
-	oauth   string
 	project string
-	email   string
-	keyID   string
-	key     *rsa.PrivateKey
+	auth    *googleAuth
+}
+
+// googleAuth gets OAuth access tokens for one service account and scope.
+type googleAuth struct {
+	oauth string
+	email string
+	keyID string
+	key   *rsa.PrivateKey
+	scope string
 
 	mu     sync.Mutex
 	access string
@@ -292,9 +304,18 @@ func loadServiceAccount(path string) (*serviceAccount, *rsa.PrivateKey, error) {
 	return &sa, rk, nil
 }
 
-// accessToken is an OAuth token for FCM, kept until a minute before it
-// expires.
-func (s *fcmSender) accessToken(ctx context.Context, hc *http.Client, now time.Time) (string, error) {
+// newGoogleAuth reads a service account file for scope; tokens come from
+// oauth (always Google's fixed token URL outside tests).
+func newGoogleAuth(path, oauth, scope string) (*googleAuth, error) {
+	sa, k, err := loadServiceAccount(path)
+	if err != nil {
+		return nil, err
+	}
+	return &googleAuth{oauth: oauth, email: sa.ClientEmail, keyID: sa.PrivateKeyID, key: k, scope: scope}, nil
+}
+
+// token is an OAuth token, kept until a minute before it expires.
+func (s *googleAuth) token(ctx context.Context, hc *http.Client, now time.Time) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.access != "" && now.Before(s.exp) {
@@ -306,7 +327,7 @@ func (s *fcmSender) accessToken(ctx context.Context, hc *http.Client, now time.T
 	}
 	in := jwtPart(hdr) + "." + jwtPart(map[string]any{
 		"iss":   s.email,
-		"scope": fcmScope,
+		"scope": s.scope,
 		"aud":   oauthURL,
 		"iat":   now.Unix(),
 		"exp":   now.Add(time.Hour).Unix(),
@@ -355,7 +376,7 @@ func printable(s string) bool {
 	return true
 }
 
-func (s *fcmSender) forget(tok string) {
+func (s *googleAuth) forget(tok string) {
 	s.mu.Lock()
 	if s.access == tok {
 		s.access = ""
@@ -378,7 +399,7 @@ type fcmMessage struct {
 }
 
 func (s *fcmSender) send(ctx context.Context, hc *http.Client, now time.Time, token []byte, ct, collapse string, high bool) (result, string) {
-	at, err := s.accessToken(ctx, hc, now)
+	at, err := s.auth.token(ctx, hc, now)
 	if err != nil {
 		return failed, "oauth-" + err.Error()
 	}
@@ -425,7 +446,7 @@ func (s *fcmSender) send(ctx context.Context, hc *http.Client, now time.Time, to
 		return gone, reason(code)
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		s.forget(at)
+		s.auth.forget(at)
 	}
 	return failed, fmt.Sprintf("fcm-%d-%s-%s", resp.StatusCode, reason(e.Error.Status), reason(code))
 }

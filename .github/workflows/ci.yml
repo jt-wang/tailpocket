@@ -1,0 +1,109 @@
+# The fast checks on every push and pull request: Go with -race, the JS SDKs, the Android unit tests, the
+# release-file checks and gitleaks, all on Linux and without any secret. Swift and the device tests are in
+# nightly.yml, which runs on the same pushes. It runs on the public repository only: every job is skipped
+# anywhere else.
+name: ci
+
+on:
+  push:
+    branches: [main, ci]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# No GOTOOLCHAIN=local here: with it set, setup-go reads go.mod's go line (1.27.1), not its toolchain line.
+# setup-go sets it itself once it has installed the toolchain.
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  go:
+    name: Go (gofmt, vet, test -race)
+    if: github.repository == 'jt-wang/tailpocket'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with: { go-version-file: go.mod }
+      - name: The Go in use is go.mod's toolchain
+        run: test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" {print $2}' go.mod)"
+      - name: gofmt
+        run: |
+          out=$(git ls-files -z -- '*.go' | xargs -0 -r gofmt -l --)
+          [ -z "$out" ] || { echo "not gofmt-formatted:"; echo "$out"; exit 1; }
+      - run: go vet ./...
+      - run: go test -count=1 -race ./...
+
+  js:
+    name: JS SDKs (sdk/js, sdk/node, sdk/react-native)
+    if: github.repository == 'jt-wang/tailpocket'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with: { go-version-file: go.mod }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: 24 }
+      - run: scripts/build-host.sh linux-amd64
+      - run: cd sdk/js && npm ci && npm test
+      - run: cd sdk/node && npm ci && npm test
+      - run: cd sdk/react-native && npm ci && npm test
+
+  android:
+    name: Android unit tests (tailpocket, tailpocket-ui)
+    if: github.repository == 'jt-wang/tailpocket'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with: { go-version-file: go.mod }
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with: { distribution: temurin, java-version: "21" }
+      - run: scripts/build-mobile.sh android
+      # tailpocket-nsh needs an nsh library that is not in this repository.
+      - run: cd sdk/android && ./gradlew --no-daemon :tailpocket:testDebugUnitTest :tailpocket-ui:testDebugUnitTest
+      # An app that shrinks with R8 builds against the published library, with and without Play Integrity.
+      - run: cd sdk/android && ./gradlew --no-daemon :tailpocket:publish
+      - run: scripts/audit-v040-android-r8.sh build/android/m2
+
+  release-checks:
+    name: Release files (3 framework binaries, phone libraries' Go version, checksums)
+    if: github.repository == 'jt-wang/tailpocket'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with: { go-version-file: go.mod }
+      - run: sh scripts/build-release-test.sh
+
+  gitleaks:
+    name: gitleaks (this tree)
+    if: github.repository == 'jt-wang/tailpocket'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: gitleaks 8.30.1 (checksum pinned)
+        run: |
+          dir="$RUNNER_TEMP/gitleaks"; mkdir -p "$dir"
+          curl -fsSL -o "$dir/g.tgz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $dir/g.tgz" | sha256sum -c -
+          tar -xzf "$dir/g.tgz" -C "$dir" gitleaks
+          "$dir/gitleaks" dir --no-banner --redact --exit-code 1 .

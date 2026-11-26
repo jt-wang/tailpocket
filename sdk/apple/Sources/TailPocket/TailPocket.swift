@@ -161,9 +161,16 @@ public struct TailPocketDialFailure: Codable, Sendable, Equatable {
 /// (after the pairing emoji: the computer's user said no or the code was spent; show a new code there),
 /// taken, unreachable, revoked, mismatch, handshake-closed, denied, local-failed, cancelled, timeout,
 /// unknown-handle, failed. Only "revoked" means the computer removed this phone: delete its link.
+/// Push calls add the codes of docs/PUSH.md §1 (stale-generation, push-refused, …).
 public struct TailPocketError: Error, Equatable, Sendable, CustomStringConvertible {
     public let code: String
-    public init(code: String) { self.code = code }
+    /// With "stale-generation": the lowest generation the gateway takes for this device.
+    public let minGeneration: UInt64?
+    /// With "push-refused": the computer's reason (push-off, gateway-not-allowed, invalid, failed).
+    public let reason: String?
+    public init(code: String, minGeneration: UInt64? = nil, reason: String? = nil) {
+        self.code = code; self.minGeneration = minGeneration; self.reason = reason
+    }
     public var description: String { "TailPocketError(\(code))" }
 }
 
@@ -200,6 +207,21 @@ public final class TailPocketConnection: @unchecked Sendable {
     public func sync(timeout: TimeInterval = 30) async throws -> TailPocketHostLink {
         let handle = self.handle
         return try await TailPocket.blocking(cancel: {}) { ConnectmobileSync(handle, Int(timeout * 1000)) }
+    }
+
+    /// Gives the computer this phone's push target over the authenticated session (never an opaque relay).
+    /// Refusals throw "push-refused" with `reason`, or "push-unsupported" for a computer without push.
+    /// `TailPocketPushPhone.give` makes the key and calls this.
+    public func givePush(_ target: TailPocketPushTarget, timeout: TimeInterval = 30) async throws {
+        let handle = self.handle
+        let json = String(decoding: try JSONEncoder().encode(target), as: UTF8.self)
+        let _: TailPocket.Empty = try await TailPocket.blocking(cancel: {}) { ConnectmobilePushGive(handle, json, Int(timeout * 1000)) }
+    }
+
+    /// Tells the computer to forget this phone's push target.
+    public func clearPush(timeout: TimeInterval = 30) async throws {
+        let handle = self.handle
+        let _: TailPocket.Empty = try await TailPocket.blocking(cancel: {}) { ConnectmobilePushClear(handle, Int(timeout * 1000)) }
     }
 
     /// How the connection reaches the computer now. Throws "revoked" once the computer removed this phone.
@@ -323,12 +345,13 @@ public enum TailPocket {
 
     // MARK: - plumbing
 
-    struct Failure: Decodable { let error: String }
+    struct Failure: Decodable { let error: String; let minGeneration: UInt64?; let reason: String? }
+    struct Empty: Decodable {}
 
     static func decode<T: Decodable>(_ text: String) throws -> T {
         let data = Data(text.utf8)
         if let failure = try? JSONDecoder().decode(Failure.self, from: data) {
-            throw TailPocketError(code: failure.error)
+            throw TailPocketError(code: failure.error, minGeneration: failure.minGeneration, reason: failure.reason)
         }
         do { return try JSONDecoder().decode(T.self, from: data) } catch { throw TailPocketError(code: "failed") }
     }

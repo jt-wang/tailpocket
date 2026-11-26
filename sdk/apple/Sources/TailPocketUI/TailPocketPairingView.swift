@@ -1,4 +1,5 @@
 #if os(iOS)
+import AVFoundation
 import SwiftUI
 import TailPocket
 
@@ -19,14 +20,9 @@ public struct TailPocketPairingView: View {
     private let options: Options
     private let phoneKey: String
     private let onPaired: (TailPocketHostLink) -> Void
-
-    @State private var hosts: [TailPocketNearbyHost] = []
+    @StateObject private var model = PairingModel(camera: Self.camera())
     @State private var browser: TailPocketNearbyHosts?
-    @State private var scanning = false
-    @State private var pasted = ""
-    @State private var status: Status = .idle
-
-    enum Status: Equatable { case idle, code(String, String), working(String), failed(String) }
+    @Environment(\.scenePhase) private var scenePhase
 
     public init(options: Options, phoneKey: String, onPaired: @escaping (TailPocketHostLink) -> Void) {
         self.options = options
@@ -34,84 +30,87 @@ public struct TailPocketPairingView: View {
         self.onPaired = onPaired
     }
 
+    /// Read at each action, so the latest arguments from the parent are used.
+    private var inputs: PairingModel.Inputs {
+        let (options, phoneKey) = (options, phoneKey)
+        return .init(
+            prefix: options.prefix,
+            pair: { try await TailPocket.pair($0, phoneKey: phoneKey, device: options.device) },
+            beginLocal: { host in
+                let pending = try await TailPocketLocalPairing.begin(with: host, device: options.device, label: options.label)
+                return .init(code: pending.code, finish: { try await pending.finish() })
+            },
+            onPaired: onPaired)
+    }
+
     public var body: some View {
+        PairingContent(model: model, inputs: inputs, showsNearby: options.service != nil)
+            .onAppear {
+                guard let service = options.service, browser == nil else { return }
+                let b = TailPocketNearbyHosts(service: service)
+                b.start(onChange: { list in Task { @MainActor in model.hosts = list } })
+                browser = b
+            }
+            .onDisappear { browser?.stop(); browser = nil }
+            // Back from Settings with the camera allowed (or taken away).
+            .onChange(of: scenePhase) { phase in if phase == .active { model.camera = Self.camera() } }
+    }
+
+    static func camera() -> PairingModel.Camera {
+        .init(supported: TailPocketQRScanner.isSupported, authorization: AVCaptureDevice.authorizationStatus(for: .video))
+    }
+}
+
+/// The pairing screen for a model, without the nearby browser and camera checks.
+@available(iOS 16.0, *)
+struct PairingContent: View {
+    @ObservedObject var model: PairingModel
+    let inputs: PairingModel.Inputs
+    let showsNearby: Bool
+
+    var body: some View {
         List {
-            if case let .code(code, host) = status {
+            if case let .code(code, host) = model.status {
                 Section("Confirm on \(host)") {
                     Text(code).font(.system(size: 40, weight: .semibold, design: .monospaced)).frame(maxWidth: .infinity)
                     Text("Check that the computer shows the same code, then approve it there.").font(.footnote).foregroundStyle(.secondary)
                 }
             }
-            if case let .working(text) = status { Section { HStack { ProgressView(); Text(text) } } }
-            if case let .failed(text) = status { Section { Text(text).foregroundStyle(.red) } }
-            if options.service != nil {
+            if case let .working(text) = model.status { Section { HStack { ProgressView(); Text(text) } } }
+            if case let .failed(text) = model.status { Section { Text(text).foregroundStyle(.red) } }
+            if showsNearby {
                 Section("On this Wi-Fi") {
-                    if hosts.isEmpty { Text("Looking for computers…").foregroundStyle(.secondary) }
-                    ForEach(hosts) { host in
-                        Button(host.name) { Task { await pairNearby(host) } }
+                    if model.hosts.isEmpty { Text("Looking for computers…").foregroundStyle(.secondary) }
+                    ForEach(model.hosts) { host in
+                        Button(host.name) { Task { await model.pairNearby(host, inputs) } }
                     }
                 }
             }
             Section("Pairing code") {
-                if TailPocketQRScanner.isAvailable { Button("Scan QR code") { scanning = true } }
-                TextField("Paste code", text: $pasted).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .onSubmit { Task { await pairText(pasted) } }
+                switch model.camera {
+                case .available:
+                    Button("Scan QR code") {
+                        Task {
+                            await model.scan(requestAccess: {
+                                await AVCaptureDevice.requestAccess(for: .video) && TailPocketQRScanner.isAvailable
+                            })
+                        }
+                    }
+                case .denied:
+                    Text("Camera access is needed to scan the code.")
+                    Button("Open Settings") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                    }
+                case .unsupported:
+                    EmptyView()
+                }
+                TextField("Paste code", text: $model.pasted).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .onSubmit { Task { await model.pairText(model.pasted, inputs) } }
             }
         }
-        .sheet(isPresented: $scanning) {
-            TailPocketQRScanner(prefix: options.prefix) { text in
-                scanning = false
-                Task { await pairText(text) }
-            }
-            .ignoresSafeArea()
-        }
-        .onAppear {
-            guard let service = options.service, browser == nil else { return }
-            let b = TailPocketNearbyHosts(service: service)
-            b.start(onChange: { list in Task { @MainActor in hosts = list } })
-            browser = b
-        }
-        .onDisappear { browser?.stop(); browser = nil }
-    }
-
-    @MainActor private func pairText(_ text: String) async {
-        guard let code = TailPocket.inviteText(in: text, prefix: options.prefix) else {
-            status = .failed("That is not a pairing code.")
-            return
-        }
-        do { await finish(try TailPocket.decodeInvite(code, prefix: options.prefix)) } catch { status = .failed(message(error)) }
-    }
-
-    @MainActor private func pairNearby(_ host: TailPocketNearbyHost) async {
-        status = .working("Connecting to \(host.name)…")
-        do {
-            let pending = try await TailPocketLocalPairing.begin(with: host, device: options.device, label: options.label)
-            status = .code(pending.code, host.name)
-            await finish(try await pending.finish())
-        } catch {
-            status = .failed(message(error))
-        }
-    }
-
-    @MainActor private func finish(_ invite: TailPocketInvite) async {
-        status = .working("Pairing with \(invite.hostName.isEmpty ? "the computer" : invite.hostName)…")
-        do {
-            let link = try await TailPocket.pair(invite, phoneKey: phoneKey, device: options.device)
-            status = .idle
-            onPaired(link)
-        } catch {
-            status = .failed(message(error))
-        }
-    }
-
-    private func message(_ error: Error) -> String {
-        switch (error as? TailPocketError)?.code {
-        case "expired": return "This pairing code has expired. Show a new one on the computer."
-        case "taken": return "Another phone already used this code."
-        case "denied": return "The computer did not approve this phone."
-        case "unreachable", "timeout": return "Could not reach the computer. Check that it is online."
-        case "invalid-invite": return "That is not a pairing code."
-        default: return "Pairing failed."
+        .sheet(isPresented: $model.scanning) {
+            TailPocketQRScanner(prefix: inputs.prefix) { text in Task { await model.scanned(text, inputs) } }
+                .ignoresSafeArea()
         }
     }
 }

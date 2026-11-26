@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -55,6 +56,33 @@ func localRelay(t *testing.T) string {
 	return "ws" + strings.TrimPrefix(ts.URL, "http")
 }
 
+// startOnFreeLoopback starts a host whose Listen is a free loopback port. A port found free can be taken
+// again before the host binds it (by the relay's own listener, or another test package), so on
+// "address already in use" it picks another port and tries again.
+func startOnFreeLoopback(t *testing.T, ctx context.Context, cfg connecthost.Config, pick func(*testing.T) string) *connecthost.Host {
+	t.Helper()
+	for range 5 {
+		if len(cfg.Listen) > 0 {
+			cfg.Listen = []string{pick(t)}
+		}
+		h, err := connecthost.New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = h.Start(ctx)
+		if err == nil {
+			return h
+		}
+		h.Close()
+		if len(cfg.Listen) == 0 || !errors.Is(err, syscall.EADDRINUSE) {
+			t.Fatal(err)
+		}
+		t.Logf("start: %v (another port)", err)
+	}
+	t.Fatal("no free loopback port after 5 tries")
+	return nil
+}
+
 func freeLoopback(t *testing.T) string {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -90,14 +118,8 @@ func noTailcat(t *testing.T, routes []string) {
 	}
 	st := &store{}
 	cfg.Save = st.save
-	h, err := connecthost.New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := startOnFreeLoopback(t, ctx, cfg, freeLoopback)
 	defer h.Close()
-	if err := h.Start(ctx); err != nil {
-		t.Fatal(err)
-	}
 	serveEcho(h)
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		up := true

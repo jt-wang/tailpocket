@@ -7,6 +7,9 @@ The note is encrypted end to end. The computer seals it with a key only that pho
 - Package `connectpush`: `Seal`, `Open`, and `Client` for the gateway API.
 - Command `cmd/tailpocket-push`: the gateway. Its README covers config and deployment.
 - `connectpush/testdata/vectors.json`: fixed vectors for the Swift and Kotlin implementations.
+- Phone: `connectmobile` `Push*` functions (register, give, revoke) and, without the Go library, the openers for the
+  notification extension: Swift `TailPocketPush` (product of the Swift package) and Kotlin `TailPocketPushReceiver`.
+- Computer: `connecthost.Host.Push`, the helper's `push` command, Node `host.push()`.
 
 ```
 phone ──register(token, generation)──▶ gateway ──▶ handle
@@ -17,15 +20,48 @@ computer ──send(handle, Seal(note))──▶ gateway ──▶ APNs / FCM �
 ## 1. Registering
 
 1. The phone gets its device token from APNs (hex) or FCM (string).
-2. It calls `POST /v1/register {app, platform, token, generation}` and gets `{handle, expires}`. `generation` starts at
-   1 and is a counter the phone keeps (see §5).
-3. It makes a **push key**: 32 bytes from the system CSPRNG, with a key id `kid` of 1–64 bytes (no NUL; random
-   base64url is a good choice). It stores both (see §6).
-4. It sends `{gateway URL, app, handle, kid, push key}` to each paired computer over the encrypted TailPocket session,
-   never by any other path.
+2. For an app whose gateway checks attestation (§7) it gets a challenge (`POST /v1/challenge {app}`) and makes
+   evidence bound to the request. It calls `POST /v1/register {app, platform, token, generation, attest?}` and gets
+   `{handle, expires}`. `generation` starts at 1 and is a counter the phone keeps (see §5).
+3. It makes a **push key** for each computer: 32 bytes from the system CSPRNG, with a key id `kid` of 1–64 bytes (no
+   NUL; `PushNewKey` makes 16 random bytes as base64url). It stores the key where its notification code reads it (§3).
+4. It sends the **push target** `{gateway, app, handle, kid, key}` (key as base64url) to that computer over the
+   authenticated TailPocket session, never by any other path:
+   - phones on Tailcat: `POST /v2/push {"target": {…}}` on the computer's control port, with the same peer check, body
+     limit and authorization as `/v2/sync` → `200 {"ok":true}`, or 400 `{"error": "push-off" | "gateway-not-allowed" |
+     "invalid"}`;
+   - phones on a relay or lan route: `{"type":"push","id":n,"target":{…}}` on the Noise session's control stream →
+     `{"type":"push-ack","id":n,"ok":true}` or `ok: false` with `error`;
+   - `{"clear": true}` instead of `target` makes the computer forget it. A relay route in `opaque` mode carries the
+     app's own encryption, not a TailPocket session, and is never used for this.
+
+   The computer takes a target only for a gateway in its own `PushGateways` list (helper config `pushGateways`),
+   and then sends to its own entry, never to the phone's spelling of it; gateway URLs are ASCII only.
+   It keeps one per phone in its state, saved like the phone's keys, and deletes it when the phone is revoked or
+   removed from the allowed list, when the gateway answers 410 or 403, and at start when the gateway is no longer
+   configured.
 5. It registers again, and sends the new handle, before `expires` (at most 30 days), whenever its token changes, and
    when a computer is removed (§5). It should make a new push key and kid at the same time. Each computer gets its own
    kid, so revoking one computer's key does not touch the others.
+
+When a computer is removed, the phone revokes at its current generation (`/v1/revoke`), deletes that computer's push
+key, registers at generation + 1, and gives the new handle to the computers that stay. A gateway that answers
+`stale_generation` with `min_generation` moves the phone up to that value.
+
+| | Go (`connectmobile`) | Swift (`TailPocket`) | Kotlin |
+|---|---|---|---|
+| New push key | `PushNewKey()` → `{kid, key}` | `TailPocket.pushNewKey()` | `TailPocket.pushNewKey()` |
+| Challenge | `PushChallenge(gw, app, ms)` | `TailPocket.pushChallenge` | `pushChallenge` |
+| Register | `PushRegister(gw, app, platform, token, gen, attest, ms)` → `{handle, expires}` | `TailPocket.pushRegister` | `pushRegister` |
+| Revoke | `PushRevoke(…)` → `{}` | `TailPocket.pushRevoke` | `pushRevoke` |
+| Give / clear | `PushGive(handle, targetJSON, ms)`, `PushClear(handle, ms)` | `connection.givePush`, `clearPush` | `connection.givePush`, `clearPush` |
+| The whole flow | | `TailPocketPushPhone` (`register`, `give`, `revoke`, `forget`) | `TailPocketPushPhone` |
+| Bridge (JavaScript) | | `tailPocket.push.register`, `.give`, `.revoke`, `.clear`, `.forget` ([BRIDGE.md](BRIDGE.md)) | same |
+
+Error codes: `stale-generation` (with `minGeneration`), `attestation-required`, `attestation-failed`,
+`attest-key-unknown` (attest a new key; `TailPocketPushPhone` does it once by itself), `rate-limited`, `push-refused`
+(with the computer's `reason`), `push-unsupported` (a computer without push), `invalid-arguments`, `unreachable`,
+`timeout`.
 
 ## 2. Sealed note, byte by byte
 
@@ -111,12 +147,91 @@ gateway cannot enforce them. The gateway, Apple or Google could replay a note, a
 4. **On any failure, show only the placeholder**, or nothing. Never show bytes from a note that did not open.
 5. Use `app` exactly as registered with the gateway as the `app` argument of Open.
 
+The SDKs do all of this:
+
+- **iOS**: the `TailPocketPush` library (CryptoKit, Security, Foundation; no Go framework, so it fits the extension's
+  memory limit). `TailPocketPushReceiver` opens with `TailPocketPushCrypto.open`, reads keys from
+  `TailPocketPushKeychain` (shared access group, `AfterFirstUnlockThisDeviceOnly`) and keeps seqs in
+  `TailPocketPushSeqFile`: one JSON file in the App Group container, read, checked and written under `flock` on a
+  lock file next to it, written to a temporary file with `F_FULLFSYNC`, renamed, and the directory synced, before
+  the note is returned. A seq file that does not parse fails every note rather than restart from 0.
+- **Android**: `TailPocketPushReceiver` with `TailPocketPushCrypto.open` (`AES/GCM/NoPadding`) and
+  `TailPocketKeystorePushStore`: push keys wrapped by an Android Keystore AES key without user authentication, seqs
+  saved with `commit()` under a lock. The lock is per process: keep the `FirebaseMessagingService` in the app's
+  process (no `android:process`).
+
+Notification Service Extension (target with the `TailPocketPush` library, the App Group and the Keychain group):
+
+```swift
+import TailPocketPush
+import UserNotifications
+
+final class NotificationService: UNNotificationServiceExtension {
+    private let receiver = TailPocketPushReceiver(app: "io.jingtao.herdr", appGroup: "group.io.jingtao.herdr",
+                                                  keychainAccessGroup: "ABCDE12345.io.jingtao.herdr.push")
+    private var request: UNNotificationRequest?
+    private var handler: ((UNNotificationContent) -> Void)?
+
+    override func didReceive(_ request: UNNotificationRequest, withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void) {
+        self.request = request
+        handler = contentHandler
+        contentHandler(receiver?.content(for: request) ?? TailPocketPushReceiver.placeholder(for: request))
+    }
+
+    override func serviceExtensionTimeWillExpire() {
+        if let request, let handler { handler(TailPocketPushReceiver.placeholder(for: request)) }
+    }
+}
+```
+
+In the app, with the same groups:
+
+```swift
+let phone = TailPocketPushPhone(keychain: TailPocketPushKeychain(accessGroup: "ABCDE12345.io.jingtao.herdr.push"),
+                                attester: TailPocketAppAttest(keychain: …, app: "io.jingtao.herdr")) // nil in strict mode
+let reg = try await phone.register(gateway: "https://push.example.com", app: "io.jingtao.herdr",
+                                   token: TailPocket.pushToken(deviceToken))
+let kid = try await phone.give(connection, gateway: "https://push.example.com", app: "io.jingtao.herdr", registration: reg)
+```
+
+Android:
+
+```kotlin
+class PushService : FirebaseMessagingService() {
+    private val receiver by lazy {
+        val store = TailPocketKeystorePushStore(this) // keys and seqs
+        TailPocketPushReceiver("io.jingtao.herdr", TailPocketPushPlaceholder("Herdr", "New activity"), store, store)
+    }
+    override fun onMessageReceived(message: RemoteMessage) {
+        val shown = receiver.receive(message.data) // never throws; the placeholder on any failure
+        // post a notification with shown.title and shown.body (and shown.note?.url / thread when it opened)
+    }
+    override fun onNewToken(token: String) { /* register again and give the new handle to each computer */ }
+}
+```
+
+`TailPocketPushPhone(TailPocket.default, TailPocketKeystorePushStore(context), TailPocketPlayIntegrity.standard(context,
+cloudProjectNumber))` registers, gives and revokes (pass `null` instead of the integrity source in strict mode). The
+SDK compiles against `com.google.android.play:integrity` but does not ship it: an app that uses
+`TailPocketPlayIntegrity` adds `implementation("com.google.android.play:integrity:1.4.0")`.
+
 ## 4. Gateway API
 
 All endpoints take and return JSON (`Content-Type: application/json`), with a body of at most 8 KiB. Unknown fields
 and trailing data are refused. Only `POST` is allowed on `/v1/*`. `GET`/`HEAD /healthz` answers `ok`. Every other path
 is 404. CONNECT, absolute-URL request targets (`GET http://example.com/`) and `OPTIONS *` are 400: the gateway is
 never a proxy.
+
+### `POST /v1/challenge`
+
+```json
+{"app": "io.jingtao.herdr"}
+```
+
+→ `200 {"challenge": "…", "expires": 1792592300}`, only for an app with `attest` (else 400
+`attest_not_configured`). A challenge is good for 5 minutes and one register or revoke, for this app only. The
+gateway keeps nothing for it until it is used: it is MACed with a key derived from the handle key. A challenge whose
+evidence does not pass is given back, so only successes fill the table of used ones.
 
 ### `POST /v1/register`
 
@@ -131,7 +246,7 @@ never a proxy.
 - `generation`: 1 to 2^53 − 1. Below the lowest valid generation for this token → `409 {"error":
   "stale_generation", "min_generation": N}`. Otherwise the lowest valid generation becomes `generation`, so every
   handle with a lower one stops working.
-- `attest`: evidence for an attestation verifier, when the app has one (§7).
+- `attest`: evidence, required when the app checks attestation for this platform (§7); otherwise leave it out.
 
 ### `POST /v1/revoke`
 
@@ -225,7 +340,11 @@ All errors are `{"error": "<code>"}`. Text from Apple or Google is never passed 
 | 400 | `bad_generation` | register, revoke | Missing, 0 or above 2^53 − 1 |
 | 400 | `bad_ct` | send | Not a sealed note (§2) |
 | 400 | `bad_collapse`, `bad_priority` | send | See §4 |
-| 401 | `attestation_failed` | register, revoke | The app's verifier refused the evidence |
+| 400 | `attest_not_configured` | challenge | The app does not check attestation |
+| 401 | `attestation_required` | register, revoke | The app checks attestation for this platform and `attest` is missing |
+| 401 | `bad_challenge` | register, revoke | The challenge is unknown, expired, used, or for another app: get a new one |
+| 401 | `attestation_failed` | register, revoke | The evidence did not pass (§7) |
+| 401 | `attest_key_unknown` | register, revoke | An App Attest assertion for a key the gateway never attested: attest a new key |
 | 403 | `forbidden`, `not_configured`, `expired`, `revoked` | send | See §5. Nothing was sent |
 | 404 | `not_found` | | Unknown path |
 | 405 | `method_not_allowed` | | Wrong method |
@@ -237,6 +356,7 @@ All errors are `{"error": "<code>"}`. Text from Apple or Google is never passed 
 | 429 | `blocked` | any | The source, or the source that registered this handle, is blocked. `Retry-After: 3600` |
 | 502 | `upstream_failed` | send | APNs or FCM failed for any other reason. Retry later |
 | 503 | `busy`, `state_unavailable` | | Too many pushes in flight; the state file could not be written (or is full) |
+| 503 | `attestation_unavailable` | register, revoke | Play Integrity could not be reached. Retry later |
 
 ## 7. Limits and caller checks
 
@@ -244,8 +364,10 @@ All errors are `{"error": "<code>"}`. Text from Apple or Google is never passed 
 |---|---|
 | Requests per source address (IPv4 address, or IPv6 /64) | 600 per minute, all endpoints |
 | Register + revoke per source address | 20 per hour |
-| Register + revoke per app, all sources | `register_per_hour`, default 1000 |
+| Register + revoke per app, all sources | `register_per_hour`, default 1000; for an app with `attest`, only requests whose evidence passed count |
 | Sends per device (all handles of one app's token) | 10 per minute and 300 per day |
+| Attestation-failure block | a source whose App Attest or Play Integrity evidence fails 3 times in a row is blocked for 1 hour on register and revoke; a success clears the count |
+| Play Integrity decodes through Google, per app | `attest.android.decode_per_hour`, default 400 (none with local keys) |
 | Bad-token block | a source with ≥ 10 of its last 20 push results and more than half of them "token not valid" is blocked for 1 hour on every endpoint, and so are handles it registered, from any address. Each result counts for the sender and for the source that registered the handle |
 | Request body / `ct` | 8 KiB / 3000 characters |
 | Pushes in flight | 256 |
@@ -255,10 +377,66 @@ more than the limit, though an event up to one slot older than the window may st
 are swept every minute, and hold at most 65,536 addresses and 262,144 devices. When a table is full of live keys, new
 keys are refused rather than old ones forgotten. A restart clears every limit and block.
 
-**Attestation.** Each app may set `attest: {"ios": {...}, "android": {...}}`, which hands register and revoke to an
-`attester` (`cmd/tailpocket-push/attest.go`) for App Attest or Play Integrity. Evidence must be bound to op, app,
-token and generation. No verifier is built in yet, and setting `attest` stops the gateway at start. Without it the
-app runs in the strict mode above.
+### Attestation
+
+Each app may set `attest: {"ios": {...}, "android": {...}}` (config in the gateway README). Then register and revoke
+for that platform (`ios` for `apns` tokens, `android` for `fcm`) need `attest` evidence, and the limits above still
+apply. A platform without it runs in strict mode.
+
+The evidence is bound to the request through the **client data**, which the gateway rebuilds from the request:
+
+```
+client_data = "tailpocket push attest 1" \n op \n app \n platform \n token \n decimal(generation) \n challenge
+              (op is "register" or "revoke")
+hash        = SHA-256(client_data)
+```
+
+Evidence made for another operation, app, token, generation or challenge does not pass. Vector: op `register`, app
+`io.jingtao.herdr`, platform `apns`, token `ab01`, generation 7, challenge `CHALLENGE` → base64url(hash) =
+`sheS7aeIcwOE_y7yGLnYIxbFa7mWPSMvt3jDBZY0N4Q`.
+
+**App Attest** (`DCAppAttestService`), evidence `{"challenge", "key_id", "attestation" | "assertion"}`, binary
+fields in standard base64 as Apple returns them:
+
+- First use of a key: `attestation = attestKey(key_id, clientDataHash: hash)`. The gateway checks the x5c chain to
+  Apple's App Attest root CA (built in), that the nonce extension (1.2.840.113635.100.8.2) equals
+  SHA-256(authData ‖ hash), that key_id is SHA-256 of the certified public key and equals the credential id, that
+  rpIdHash is SHA-256(team_id "." bundle_id), the counter is 0 and the aaguid matches `env` (`appattest` or
+  `appattestdevelop`). It then stores key_id → public key and counter in `state_file`; a key attested once cannot
+  be attested again.
+- Every later request: `assertion = generateAssertion(key_id, clientDataHash: hash)`. The gateway checks the ECDSA
+  signature over SHA-256(authData ‖ hash) with the stored key, rpIdHash, and that the counter is **strictly greater**
+  than the stored one, then stores the new counter. A key it does not know gives `attest_key_unknown`.
+- Swift: `TailPocketAppAttest` keeps the key id in the Keychain group, attests a new key the first time and asserts
+  after that.
+
+**Play Integrity**, evidence `{"challenge", "token"}`. The phone asks for a token with `requestHash = base64url(hash)`
+(standard request) or `nonce = base64url(hash)` (classic request, padding allowed). The gateway sends it to
+`https://playintegrity.googleapis.com/v1/<package>:decodeIntegrityToken` with an OAuth token for the configured
+service account, and requires: `requestDetails.requestHash` or `.nonce` equal to base64url(hash),
+`requestPackageName` and `appIntegrity.packageName` equal to `package_name`, `timestampMillis` no older than 10 minutes
+and no more than 1 minute ahead, `appRecognitionVerdict` `PLAY_RECOGNIZED`, every `certificateSha256Digest` in
+`certificate_sha256`, and `MEETS_DEVICE_INTEGRITY` in `deviceRecognitionVerdict`. That host is added to the fixed
+outbound list only for apps with `attest.android`.
+
+The gateway decodes tokens one of two ways, chosen per app:
+- **Locally (recommended)**, when `attest.android` has `decryption_key_file` and `verification_key_file`: the
+  publisher's own response encryption keys (§11, Google step 7). The gateway decrypts the classic token (a compact
+  JWE, `A256KW` + `A256GCM`) and checks Google's signature on the JWS inside (`ES256`); any other algorithm, a `zip`
+  or `crit` header, or a standard-request token is refused. Google is never called and there is no decode budget.
+  The app must make classic requests: `TailPocketPlayIntegrity.classic(context)`.
+- **Through Google**, without those keys: `decodeIntegrityToken` as above. Each register or revoke that reaches this
+  step costs one call, whether its token is real or not, so the gateway makes at most
+  `attest.android.decode_per_hour` (default 400) a hour per app; over that it answers 503
+  `attestation_unavailable` without calling Google. Kotlin: `TailPocketPlayIntegrity.standard(context,
+  cloudProjectNumber)` or `.classic(context)`.
+
+Either way, a source (IPv4 address or IPv6 /64) whose evidence fails 3 times in a row is blocked for 1 hour on
+register and revoke (429 `blocked`), before it takes a challenge or reaches Google; a success clears its count. A
+source's requests still being checked count with its failures, so at most 3 are checked at once and a source that
+sends in parallel gets no more past the check than one that waits. Answers about the gateway rather than the evidence
+(503 `attestation_unavailable` when Google is unreachable, answers 5xx, or the gateway cannot get its own access
+token; `bad_challenge`; `attest_key_unknown`) count nothing.
 
 ## 8. Who sees what
 
@@ -286,8 +464,131 @@ Details: [cmd/tailpocket-push/README.md](../cmd/tailpocket-push/README.md).
 
 ## 10. Known gaps
 
-- Anyone who knows a device token can register it or revoke its handles. Tokens are treated as secrets, but strict
-  mode cannot tell the real app from someone with its token. Attestation closes this and is not built yet.
+- In strict mode (no `attest`), anyone who knows a device token can register it or revoke its handles. Tokens are
+  treated as secrets, but strict mode cannot tell the real app from someone with its token. Set `attest` for apps that
+  can use App Attest and Play Integrity.
+- App Attest: Apple's receipt and fraud metric are not checked, and a phone that loses its key id (reinstall)
+  attests a new key; old keys stay in `state_file`. Play Integrity: only `MEETS_DEVICE_INTEGRITY` is required, not
+  `MEETS_STRONG_INTEGRITY`, and apps not from Google Play (sideloaded, other stores) fail `PLAY_RECOGNIZED`.
+- **Made-up Play Integrity tokens (PG4), without local keys.** The gateway cannot tell a made-up token from a real
+  one without asking Google, so each one costs a decode until its source is blocked: at most 3 per source an hour,
+  sent one at a time, all at once, or hanging up before the answer. About `decode_per_hour` / 3 sources (134 with the default; an IPv6 /64 is one
+  source, so one /56 is enough) use up the hour, and the app's real Android phones then get 503 `attestation_unavailable` on register and revoke until the
+  hour turns. With local keys (§7) this costs nothing and leaves no budget to use up: use them for any deployed
+  gateway with `attest.android`.
+- The attestation-failure block counts per source address, so phones behind one carrier NAT address share it:
+  3 failures from anyone there block that address for everyone behind it for an hour.
 - Limits and blocks are in memory and per process. A restart clears them, and several replicas each count separately.
 - The gateway sees the device token, the source addresses and the timing of every push. Only the note's contents are
   hidden.
+
+## 11. Setup for each app
+
+These are the steps a publisher does once per app, here for `io.jingtao.herdr` with team id `ABCDE12345`; replace
+both. Do them for every app the gateway serves (Herdr Anywhere, DSH Anywhere, Boop).
+
+### Apple (developer.apple.com → Certificates, Identifiers & Profiles, and Xcode)
+
+1. **Team ID**: Account → Membership details → Team ID (10 characters). It goes into the gateway as `apns.team_id`
+   and is the prefix of the Keychain group below.
+2. **App ID** of the app: Identifiers → the app's bundle id (`io.jingtao.herdr`) → tick **Push Notifications**,
+   **App Groups** and **App Attest** → Save. The bundle id goes into the gateway as `apns.topic` (and is
+   `ios.bundle_id` by default).
+3. **App Group**: Identifiers → `+` → App Groups → `group.io.jingtao.herdr`. Then on the app's App ID, App Groups →
+   Configure → select it.
+4. **Notification Service Extension**: in Xcode, File → New → Target → Notification Service Extension, bundle id
+   `io.jingtao.herdr.NotificationService` (Xcode registers the App ID with automatic signing; otherwise add it under
+   Identifiers with App Groups ticked and the same group selected). Deployment target iOS 15 or later. Add the Swift
+   package product **TailPocketPush** to this target only (the app target gets **TailPocket**). Put the code of §3 in
+   `NotificationService.swift`.
+5. **Capabilities in Xcode** (Signing & Capabilities, `+ Capability`):
+   - app target: Push Notifications; App Groups → `group.io.jingtao.herdr`; Keychain Sharing → `io.jingtao.herdr.push`;
+     App Attest (only for a gateway with `attest.ios`);
+   - extension target: App Groups → the same group; Keychain Sharing → the same `io.jingtao.herdr.push`.
+
+   Xcode writes the Keychain group as `$(AppIdentifierPrefix)io.jingtao.herdr.push`. In code pass the full group,
+   `ABCDE12345.io.jingtao.herdr.push`, to `TailPocketPushKeychain(accessGroup:)` and to the receiver.
+6. **App Attest environment**: the App Attest capability adds the entitlement
+   `com.apple.developer.devicecheck.appattest-environment`. Set it to `production` in the app's `.entitlements` for
+   builds that go to TestFlight and the App Store (Apple uses production for those in any case), and set the gateway's
+   `attest.ios.env` to `production`. A debug build run from Xcode with `development` needs a gateway app with
+   `env: development`; use a second gateway app id for it (for example `io.jingtao.herdr.dev` with the same `topic`,
+   `apns.env: sandbox`, `attest.ios.env: development`), since debug builds also get sandbox APNs tokens.
+7. **APNs key**: Keys → `+` → name it, tick **Apple Push Notifications service (APNs)** → Configure (environment
+   Sandbox & Production, team scoped) → Continue → Register → **Download** `AuthKey_<KEYID>.p8`. It downloads only
+   once: keep it in your secrets store. The 10-character Key ID is on the key's page. Gateway: `apns.key_id`,
+   `apns.key_file`, and `apns.env` (`production` for TestFlight and App Store builds, `sandbox` for Xcode builds).
+8. **In the app**: `UIApplication.shared.registerForRemoteNotifications()`, and in
+   `application(_:didRegisterForRemoteNotificationsWithDeviceToken:)` pass `TailPocket.pushToken(deviceToken)` to
+   `TailPocketPushPhone.register`, then `give` the handle to each computer. Ask for notification permission
+   (`UNUserNotificationCenter.requestAuthorization`) as usual.
+
+### Google (Firebase console, Google Cloud console, Play Console)
+
+1. **Firebase project**: console.firebase.google.com → Add project (or add Firebase to an existing Google Cloud
+   project). Project settings → General shows the **Project ID** (gateway `fcm.project_id`) and the **Project
+   number** (for Play Integrity standard requests, `cloudProjectNumber`).
+2. **Android app in Firebase**: Project settings → General → Add app → Android → package name `io.jingtao.herdr` →
+   Register → download **`google-services.json`** into the app module (`app/`). Add the
+   `com.google.gms.google-services` Gradle plugin and `com.google.firebase:firebase-messaging`, and declare the
+   `FirebaseMessagingService` of §3 in the manifest (in the app's own process).
+3. **FCM API**: Project settings → Cloud Messaging → check that **Firebase Cloud Messaging API (V1)** is enabled
+   (enable it in the Cloud console if not).
+4. **FCM service account**: Project settings → Service accounts → **Generate new private key** → a JSON file. This is
+   `fcm.credentials_file`. Alternatively create one in the Cloud console (IAM & Admin → Service accounts → Create)
+   with the role **Firebase Cloud Messaging API Admin** and add a JSON key. Keep the file secret.
+5. **Play Console app integrity**: play.google.com/console → the app → **Protected with Play** (older consoles: Test
+   and release → App integrity) → Play Integrity API → Get started → **Link Cloud project** → choose the Firebase
+   project. Linking enables the **Google Play Integrity API** in that project; check under Cloud console → APIs &
+   Services → Enabled APIs, and enable it there if it is missing.
+6. **Play Integrity service account**: Cloud console of the linked project → IAM & Admin → Service accounts → Create
+   (for example `play-integrity-decoder`) → Keys → Add key → JSON. Google's documentation asks only that it belong to
+   the linked project and names no role; the gateway asks for the `playintegrity` OAuth scope. The FCM service
+   account of step 4 also works if it is in the same project. Gateway: `attest.android.credentials_file` (defaults
+   to `fcm.credentials_file`).
+   **Quota**: before deploying, look up the project's Play Integrity quota (Play Console → the app → Play Integrity
+   API settings, or Cloud console → APIs & Services → Google Play Integrity API → Quotas; the default is a daily
+   limit per app). Set `attest.android.decode_per_hour` so that 24 × it stays below that daily limit, leaving room
+   for the app's own use of the API; ask Google for a higher quota before raising it.
+7. **Response encryption keys, for local decoding (recommended)**: Play Console → the app → Play Integrity API
+   settings → Classic requests → Response encryption → Change → **Manage and download my response encryption keys**.
+   Play Console asks for a public key of yours, gives back the keys encrypted to it, and you decrypt that file with
+   your private key; Google's page developer.android.com/google/play/integrity/classic ("Decrypt and verify the
+   integrity verdict locally") has the exact steps and command. The result is two base64 strings:
+   - the **decryption key** (32 bytes, AES-256): one line in a file on the gateway, mode 600, for example
+     `/etc/tailpocket-push/<app>-pi-decryption.key`; config `attest.android.decryption_key_file`. The gateway refuses
+     to start if other users can read it. Keep it as secret as the handle key.
+   - the **verification key** (a P-256 public key): one line in a file next to it, for example
+     `/etc/tailpocket-push/<app>-pi-verification.key`; config `attest.android.verification_key_file`.
+   Relative paths are read from the config file's directory. With these keys set, the gateway needs no Play
+   Integrity service account (step 6), and the app uses `TailPocketPlayIntegrity.classic(context)`. Do not count on
+   `decodeIntegrityToken` for classic tokens after the switch. Without them, skip this step, keep step 6 and the
+   quota note.
+8. **Signing certificate SHA-256**: Play Console → the app → Test and release → App integrity → **App signing** → "App
+   signing key certificate" → SHA-256 certificate fingerprint. Put it in `attest.android.certificate_sha256` (colons
+   allowed), with `attest.android.package_name` set to `io.jingtao.herdr`. Builds not installed from Google Play
+   (debug builds from Android Studio) fail `PLAY_RECOGNIZED`: test them against a gateway app without `attest`, or
+   through an internal testing track.
+9. **In the app**: add `implementation("com.google.android.play:integrity:1.4.0")`, make
+   `TailPocketPushPhone(TailPocket.default, TailPocketKeystorePushStore(context),
+   TailPocketPlayIntegrity.classic(context))` with local keys (step 7), or
+   `TailPocketPlayIntegrity.standard(context, <project number>)` without them), register with the token from
+   `FirebaseMessaging.getInstance().token` and in `onNewToken`, and give the handle to each computer. On Android 13 and
+   later ask for `POST_NOTIFICATIONS`.
+
+### Gateway and computer
+
+1. Add the app to the gateway config with `placeholder`, `apns` and/or `fcm`, and `attest` when you did the
+   attestation steps (gateway README).
+2. Give the computer's host the gateway URL in `PushGateways` (helper config `pushGateways`); a computer refuses
+   targets for any other gateway.
+3. Build the apps with the gateway URL they register with. The gateway's host and domain are not decided yet, and
+   nothing here is deployed.
+4. **Before going live with `attest.android`, check a made-up token against the real Play Integrity.** The limits in
+   §7 and §10 count a made-up token as a failed attestation only because Google answers `decodeIntegrityToken` with
+   400 for it; nobody has run that against Google yet. With the deployed gateway and its real config, get a challenge
+   (`POST /v1/challenge {app}`) and send `POST /v1/register` with any FCM-shaped token and
+   `"attest": {"challenge": "<it>", "token": "made-up"}`. Expect **401 `attestation_failed`**. A 503
+   `attestation_unavailable` means a made-up token is not counted against its source: do not turn `attest.android`
+   on through Google; use local keys (Google step 7) or report it. With local keys the same request must also give
+   401 (decoded on the gateway, no call to Google). Repeat with a real token from a Play-installed build: expect 200.

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jt-wang/tailpocket/connectinvite"
+	"github.com/jt-wang/tailpocket/internal/testhook"
 )
 
 func TestKeys(t *testing.T) {
@@ -308,4 +309,28 @@ func TestForwardCarriesOnlyRequestsWithTheToken(t *testing.T) {
 func timedOut(err error) bool {
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()
+}
+
+// Push over an encrypted route is bounded by perRoute while the route is set up, even when the caller
+// gives no deadline: a relay that takes the connection and never answers the WebSocket upgrade ends in
+// ErrUnreachable, not in a call that runs until the app gives up.
+func TestPushOverASilentRelayIsBounded(t *testing.T) {
+	testhook.LoopbackRoutes = true
+	silent := auditSilent(t)
+	s, err := Connect(Link{Name: "Mac", Key: NewKey(), HostKey: auditSomeHostKey(t),
+		Via: []connectinvite.Route{{T: connectinvite.RouteRelay, U: "ws://" + silent, R: "AAAAAAAAAAAAAAAAAAAAAA"}}}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	done := make(chan error, 1)
+	go func() { done <- s.ClearPush(context.Background()) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrUnreachable) {
+			t.Fatalf("ClearPush over a relay that never answers: %v, want ErrUnreachable", err)
+		}
+	case <-time.After(perRoute + 5*time.Second):
+		t.Fatalf("ClearPush still running after %s", perRoute+5*time.Second)
+	}
 }

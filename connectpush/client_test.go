@@ -89,3 +89,16 @@ func TestClientRefusesUnsafeURLsAndRedirects(t *testing.T) {
 		}
 	}
 }
+
+// Gateway URLs are ASCII: a lookalike such as U+0130 in the host would be dialled under its
+// punycode name, which is another host.
+func TestValidGatewayIsASCII(t *testing.T) {
+	for _, u := range []string{"https://push.j\u0130ngtao.io", "https://push.example.\u0130o", "https://\u212Aite.example"} {
+		if ValidGateway(u) == nil {
+			t.Errorf("%q accepted", u)
+		}
+	}
+	if err := ValidGateway("https://push.example.test"); err != nil {
+		t.Fatal(err)
+	}
+}

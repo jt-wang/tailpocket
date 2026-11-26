@@ -28,7 +28,7 @@ TAILPOCKET_STATE="$out/state.json" TAILPOCKET_NAME="rn ios host" node examples/n
 host=$!
 for _ in $(seq 1 60); do grep -q '^QR ' "$log" && break; sleep 1; done
 qr=$(sed -n 's/^QR //p' "$log")
-[ -n "$qr" ] || { echo "host did not print an invite"; cat "$log"; exit 1; }
+[ -n "$qr" ] || { echo "the host printed no invite; its log, invite lines removed:"; { grep -v -E '^(QR|QR2) ' "$log" || true; }; exit 1; }
 
 # A launch argument, not the pairing link: the simulator asks before it opens a link.
 xcrun simctl launch "$udid" "$APP" -tailPocketInvite "$qr" >/dev/null
@@ -43,7 +43,7 @@ for _ in $(seq 1 60); do
 done
 if ! echo "$text" | grep -q 'hello from the computer'; then
   echo "FAIL: the app did not show the computer's answer. On screen:"; echo "$text"
-  echo "host:"; cat "$log"
+  echo "host log, invite lines removed:"; { grep -v -E '^(QR|QR2) ' "$log" || true; }
   exit 1
 fi
 echo "PASS: the RN app showed hello from the computer"

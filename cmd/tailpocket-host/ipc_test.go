@@ -42,6 +42,7 @@ func TestConfigErrorsAreOneFixedLine(t *testing.T) {
 		`{"v":1,"forward":"127.0.0.1:8080","tailcatOnly":true,"relays":[{"url":"wss://r.example","token":"t"}]}` + "\n": "invalid-config",
 		`{"v":1,"forward":"127.0.0.1:8080","tailcatOnly":true,"listen":["192.168.1.20:7681"]}` + "\n":                   "invalid-config",
 		`{"v":1,"forward":"127.0.0.1:8080","relays":[{"url":"wss://r.example","token":"t","opaque":true}]}` + "\n":      "invalid-config",
+		`{"v":1,"forward":"127.0.0.1:8080","pushGateways":["http://push.example.com"]}` + "\n":                          "invalid-config",
 		`{"v":1,"forward":"127.0.0.1:8080","routes":[]}` + "\n":                                                         "invalid-config",
 		`{"v":1,"forward":"127.0.0.1:8080","routes":["relay"]}` + "\n":                                                  "invalid-config",
 		`{"v":1,"forward":"127.0.0.1:8080","routes":["lan"],"tailcatOnly":true}` + "\n":                                 "invalid-config",
@@ -382,6 +383,32 @@ func TestLiveHelperRelay(t *testing.T) {
 		if _, ok := audits.Load(k); !ok {
 			t.Errorf("no %s audit event", k)
 		}
+	}
+}
+
+func TestPushCommand(t *testing.T) {
+	in, w := io.Pipe()
+	r, out := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- Run(context.Background(), in, out); out.Close() }()
+	ev := events(r)
+	io.WriteString(w, `{"v":1,"forward":"127.0.0.1:9","noLan":true,"pushGateways":["https://push.example.com"]}`+"\n")
+	ev.next(t, "ready")
+	io.WriteString(w, `{"cmd":"status","id":"s"}`+"\n")
+	if e := ev.next(t, "status"); e["push"] == nil || len(e["push"].([]any)) != 0 {
+		t.Fatalf("status %v", e)
+	}
+	io.WriteString(w, `{"cmd":"push","id":"p1","phone":"nodekey:`+strings.Repeat("ab", 32)+`"}`+"\n")
+	if e := ev.next(t, "error"); e["code"] != "invalid-command" || e["id"] != "p1" {
+		t.Fatalf("push without note: %v", e)
+	}
+	io.WriteString(w, `{"cmd":"push","id":"p2","phone":"nodekey:`+strings.Repeat("ab", 32)+`","note":{"title":"T","body":"B"}}`+"\n")
+	if e := ev.next(t, "error"); e["code"] != "push-no-target" || e["id"] != "p2" {
+		t.Fatalf("push to a phone without a target: %v", e)
+	}
+	w.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

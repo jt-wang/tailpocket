@@ -162,7 +162,9 @@ func TestFailClosedIPCCommandsAreTheReviewedOnes(t *testing.T) {
 	handled, answers := ipcCommands(t)
 	slices.Sort(handled)
 	slices.Sort(answers)
-	reviewed := []string{"cancel", "confirm", "disconnect", "local", "pair", "revoke", "setAllowed", "status"}
+	// push: sends only to the target a phone gave over its session, for a gateway in the config's
+	// pushGateways (no command can add one); it runs nothing and names no file.
+	reviewed := []string{"cancel", "confirm", "disconnect", "local", "pair", "push", "revoke", "setAllowed", "status"}
 	if !slices.Equal(handled, reviewed) {
 		t.Errorf("handle acts on %v, reviewed %v", handled, reviewed)
 	}

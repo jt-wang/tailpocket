@@ -24,7 +24,19 @@ bhost=$!
 trap 'kill $host $bhost $rhost $relay 2>/dev/null; rm -f "$log" "$blog" "$rlog"' EXIT
 for _ in $(seq 1 60); do grep -q '^QR ' "$log" && grep -q '^QR ' "$blog" && grep -q '^QR2 ' "$rlog" && break; sleep 1; done
 qr=$(sed -n 's/^QR //p' "$log"); bqr=$(sed -n 's/^QR //p' "$blog"); rqr=$(sed -n 's/^QR2 //p' "$rlog")
-[ -n "$qr" ] && [ -n "$bqr" ] && [ -n "$rqr" ] || { echo "host did not print an invite"; cat "$log" "$blog" "$rlog"; exit 1; }
+# An invite pairs a phone with that host: name the host that printed none, and show only its log, without
+# any invite line (CI logs are public).
+missing=""
+[ -n "$qr" ] || missing="$missing e2e-host:$log"
+[ -n "$bqr" ] || missing="$missing e2e-bridge-host:$blog"
+[ -n "$rqr" ] || missing="$missing e2e-relay-host:$rlog"
+if [ -n "$missing" ]; then
+  for m in $missing; do
+    echo "${m%%:*} printed no invite; its log, invite lines removed:"
+    grep -v -E '^(QR|QR2) ' "${m#*:}" || true
+  done
+  exit 1
+fi
 TEST_RUNNER_TAILPOCKET_INVITE="$qr" TEST_RUNNER_TAILPOCKET_BRIDGE_INVITE="$bqr" TEST_RUNNER_TAILPOCKET_RELAY_INVITE="$rqr" xcodebuild test -scheme TailPocket-Package -destination "id=$udid" \
   -only-testing:TailPocketTests/SimulatorLiveTests -only-testing:TailPocketTests/UnitTests -quiet
 grep -q '^PAIRED iOS Simulator' "$log" && grep -q '^PAIRED iOS bridge' "$blog" && grep -q '^PAIRED iOS relay' "$rlog" && echo "PASS: all three hosts saw the simulator pair"

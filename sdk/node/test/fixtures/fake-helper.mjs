@@ -31,7 +31,17 @@ lines.on('line', async (line) => {
       const routes = config.routes ? [...(config.relays ?? []).map((r) => ({ t: 'relay', u: r.url, r: 'ROOM' })),
         ...(config.routes.includes('lan') ? [{ t: 'lan', a: ['192.168.1.20'], p: 7681 }] : [])] : config.tailcatOnly ? [{ t: 'tailcat' }] : [...(config.relays ?? []).map((r) => ({ t: 'relay', u: r.url, r: 'ROOM', ...(r.opaque ? { m: 'opaque' } : {}) })),
         ...(config.noLan ? [] : [{ t: 'lan', a: ['192.168.1.20'], p: 7681 }])];
-      out({ event: 'status', id: msg.id, address: '', routes, relays: Object.fromEntries((config.relays ?? []).map((r) => [r.url, 'up'])) });
+      out({ event: 'status', id: msg.id, address: '', routes, relays: Object.fromEntries((config.relays ?? []).map((r) => [r.url, 'up'])),
+        push: Object.keys(config.push ?? {}) });
+      break;
+    }
+    case 'push': {
+      // As the helper: a note goes only to a phone with a target, and only with a gateway configured.
+      const t = (config.push ?? {})[msg.phone];
+      if (!msg.note) out({ event: 'error', id: msg.id, code: 'invalid-command' });
+      else if (!t || !(config.pushGateways ?? []).includes(t.gateway)) out({ event: 'error', id: msg.id, code: 'push-no-target' });
+      else if ((msg.note.body ?? '').length > 2000) out({ event: 'error', id: msg.id, code: 'push-too-large' });
+      else out({ event: 'pushed', id: msg.id, phone: msg.phone });
       break;
     }
     case 'disconnect': out({ event: 'disconnected', id: msg.id, phone: msg.phone }); break;

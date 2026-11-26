@@ -14,7 +14,8 @@ import (
 // genStore is the gateway's only lasting state: for each device (see
 // deviceKey), the lowest handle generation still valid. A phone raises it
 // by registering with a higher generation or with /v1/revoke, and every
-// handle it got before then stops working.
+// handle it got before then stops working. For apps with App Attest it also
+// holds each attested key's public key and last counter.
 //
 // It is one JSON file, written whole to a temporary file and renamed over
 // the old one, so a crash leaves either the old file or the new one. A
@@ -23,8 +24,17 @@ type genStore struct {
 	path string
 	max  int
 
-	mu sync.Mutex
-	m  map[string]genEntry
+	mu     sync.Mutex
+	m      map[string]genEntry
+	attest map[string]attestKey // App Attest key id (base64url) -> key
+}
+
+// attestKey is one App Attest key the gateway has seen attested.
+type attestKey struct {
+	App     string `json:"app"`
+	Pub     string `json:"pub"` // uncompressed P-256 point, base64url
+	Counter uint32 `json:"counter"`
+	At      int64  `json:"at"` // unix seconds of the last use
 }
 
 type genEntry struct {
@@ -33,20 +43,31 @@ type genEntry struct {
 }
 
 type stateFile struct {
-	Version       int                 `json:"version"`
-	MinGeneration map[string]genEntry `json:"min_generation"`
+	Version       int                  `json:"version"`
+	MinGeneration map[string]genEntry  `json:"min_generation"`
+	AttestKeys    map[string]attestKey `json:"attest_keys,omitempty"`
 }
 
-// maxGenEntries bounds the file (about 100 bytes an entry).
-const maxGenEntries = 200_000
+// maxGenEntries bounds the file (about 100 bytes an entry), and
+// maxAttestKeys its App Attest keys (about 180 bytes each). An attest key
+// unused for attestKeyLife is forgotten; the phone attests a new one.
+const (
+	maxGenEntries = 200_000
+	maxAttestKeys = 200_000
+	attestKeyLife = 180 * 24 * time.Hour
+)
 
 var (
 	errStale     = errors.New("generation below the lowest valid one")
 	errStateFull = errors.New("state is full")
+
+	errAttestKnown   = errors.New("app attest key already attested")
+	errAttestUnknown = errors.New("app attest key unknown")
+	errAttestCounter = errors.New("app attest counter not above the last")
 )
 
 func loadGenStore(path string) (*genStore, error) {
-	g := &genStore{path: path, max: maxGenEntries, m: map[string]genEntry{}}
+	g := &genStore{path: path, max: maxGenEntries, m: map[string]genEntry{}, attest: map[string]attestKey{}}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		// Write it now, so a state_file that cannot be written stops the
@@ -67,7 +88,60 @@ func loadGenStore(path string) (*genStore, error) {
 	for k, e := range f.MinGeneration {
 		g.m[k] = e
 	}
+	for k, e := range f.AttestKeys {
+		g.attest[k] = e
+	}
 	return g, nil
+}
+
+// getAttestKey returns the App Attest key with id.
+func (g *genStore) getAttestKey(id string) (attestKey, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	k, ok := g.attest[id]
+	return k, ok
+}
+
+// addAttestKey stores a newly attested key, on disk before it returns. A
+// key is attested once: a second attestation of the same id is refused.
+func (g *genStore) addAttestKey(id string, k attestKey) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.attest[id]; ok {
+		return errAttestKnown
+	}
+	if len(g.attest) >= maxAttestKeys {
+		return errStateFull
+	}
+	g.attest[id] = k
+	if err := g.saveLocked(); err != nil {
+		delete(g.attest, id)
+		return err
+	}
+	return nil
+}
+
+// useAttestKey raises the key's counter to counter, which must be above
+// the stored one, on disk before it returns. Checking and raising under one
+// lock means two requests can never both pass with the same counter.
+func (g *genStore) useAttestKey(id, app string, counter uint32, now time.Time) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	k, ok := g.attest[id]
+	if !ok || k.App != app {
+		return errAttestUnknown
+	}
+	if counter <= k.Counter {
+		return errAttestCounter
+	}
+	old := k
+	k.Counter, k.At = counter, now.Unix()
+	g.attest[id] = k
+	if err := g.saveLocked(); err != nil {
+		g.attest[id] = old
+		return err
+	}
+	return nil
 }
 
 // min is the lowest valid generation for device key k (0 when none).
@@ -135,12 +209,26 @@ func (g *genStore) sweep(now time.Time) error {
 			delete(g.m, k)
 		}
 	}
-	if gone == nil {
+	var goneKeys map[string]attestKey
+	keyCut := now.Add(-attestKeyLife).Unix()
+	for k, e := range g.attest {
+		if e.At < keyCut {
+			if goneKeys == nil {
+				goneKeys = map[string]attestKey{}
+			}
+			goneKeys[k] = e
+			delete(g.attest, k)
+		}
+	}
+	if gone == nil && goneKeys == nil {
 		return nil
 	}
 	if err := g.saveLocked(); err != nil {
 		for k, e := range gone {
 			g.m[k] = e
+		}
+		for k, e := range goneKeys {
+			g.attest[k] = e
 		}
 		return err
 	}
@@ -148,7 +236,7 @@ func (g *genStore) sweep(now time.Time) error {
 }
 
 func (g *genStore) saveLocked() error {
-	b, err := json.Marshal(stateFile{Version: 1, MinGeneration: g.m})
+	b, err := json.Marshal(stateFile{Version: 1, MinGeneration: g.m, AttestKeys: g.attest})
 	if err != nil {
 		return err
 	}

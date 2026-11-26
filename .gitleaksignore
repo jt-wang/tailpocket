@@ -4,3 +4,9 @@ examples/rn-phone/ios/Podfile.lock:generic-api-key:1991
 cmd/tailpocket-relay/failclosed_test.go:generic-api-key:187
 connectrelay/failclosed_test.go:generic-api-key:116
 connectrelay/failclosed_test.go:generic-api-key:576
+# Play Integrity test vectors made with Python's `cryptography` (see playintegrity_local_test.go): a
+# throwaway decryption key of bytes 00..1f, the matching test verification key (a public key), and
+# RFC 3394's key-wrap test key 0011..ff. None is a real key.
+cmd/tailpocket-push/testdata/playintegrity_local.json:generic-api-key:2
+cmd/tailpocket-push/testdata/playintegrity_local.json:generic-api-key:3
+cmd/tailpocket-push/testdata/playintegrity_local.json:generic-api-key:8
