@@ -57,6 +57,11 @@ since v0.3.0-pre.4 the `lan` route is on by default, see `listen`):
 - `authorize`: every connection from a known phone waits for your `authorized` answer (5 s, then
   denied).
 - `audit`: `audit` events for pairings, revokes, sessions and refusals.
+- `pushGateways` (push, not yet in a release): tailpocket-push gateways (`https://…`; `http://` only to loopback)
+  phones may give push targets for ([PUSH.md](PUSH.md)). Empty or missing turns push off: phones'
+  targets are refused. A gateway that is not a valid URL is `invalid-config`.
+- `push` (push, not yet in a release): `state.push` from the last `save`. A target for a gateway no longer in
+  `pushGateways` is dropped.
 
 ### Opaque relays: your app MUST authenticate every connection
 
@@ -80,7 +85,8 @@ not set it to get past the error.
 | `setAllowed` | `id`, `allowed` | replace the allowlist |
 | `revoke` | `id`, `phone` | remove one phone; its encrypted sessions get bye `unpaired` |
 | `disconnect` | `id`, `phone` | close one phone's connections, keep it paired (its sign-in ran out) |
-| `status` | `id` | report address, routes and relays |
+| `status` | `id` | report address, routes, relays and the phones with a push target |
+| `push` | `id`, `phone`, `note` (`{title, body, thread, url, kind}`), `collapse`, `priority` (`high` or `normal`) | seal `note` for the phone and send it through its push gateway |
 | `saved` | `id` (of a `save`), `ok` | you stored the state (or failed to) |
 | `authorized` | `id` (of an `authorize`), `ok` | allow or deny that connection |
 
@@ -89,7 +95,7 @@ not set it to get past the error.
 | Event | Fields | Meaning |
 |---|---|---|
 | `ready` | `address` | started |
-| `save` | `id`, `state` (`{identity, allowed, keys}`) | store this, then send `saved`; the change waits for it |
+| `save` | `id`, `state` (`{identity, allowed, keys, push}`) | store this, then send `saved`; the change waits for it. `push` holds each phone's push key: store it like `identity` |
 | `pairing` | `id`, `expiresAt`, and `qr`, `invite` (v1 window) or `qr2`, `invite2` (`emoji` window) | show the QR text as a QR code or link |
 | `pairRequest` | `id`, `phone`, `device`, `route` (`tailcat`, `relay`, `lan`), `emoji` (four, or null) | `emoji` windows: ask the user; send `confirm` |
 | `pairRequestCancelled` | `id` | the phone left, the window closed, or 55 s passed before your `confirm`; the code is spent |
@@ -102,7 +108,8 @@ not set it to get past the error.
 | `authorize` | `id`, `phone`, `route` (`tailcat`, `relay`, `lan`) | answer with `authorized` |
 | `audit` | `kind` (`paired`, `revoked`, `conn-open`, `conn-close`, `denied`), `phone`, `route`, `reason`, `time` (ms) | log it |
 | `disconnected` | `id`, `phone` | `disconnect` took effect |
-| `status` | `id`, `address`, `routes`, `relays` (`{url: "up" or why not}`) | answers `status` |
+| `status` | `id`, `address`, `routes`, `relays` (`{url: "up" or why not}`), `push` (phones with a push target) | answers `status` |
+| `pushed` | `id`, `phone` | the gateway took the note (202) |
 | `error` | `code`, `id` (when it answers a command) | see below |
 
 ## Pairing
@@ -138,7 +145,15 @@ with `listen`, and a contradictory `routes` are `invalid-config` (route errors a
 without Tailcat has no route up yet: no lan address, relay not registered), `local-unavailable`, `local-not-approved`, `local-too-many-attempts` (the
 window answered `MaxAttempts` = 3 phones without an approval and closed: ask the user to start
 again), `local-failed`,
-`nothing-to-confirm`, `invalid-allowed`, `operation-failed`.
+`nothing-to-confirm`, `invalid-allowed`, `operation-failed`; for `push`: `push-no-target` (the phone
+gave none, or push is off), `push-gone` (the gateway says the phone's handle no longer works: the
+helper dropped it, and the phone gives a new one when it next registers), `push-too-large` (shorten
+`body`), `push-rate-limited`, `push-failed`.
+
+Each `push` saves the note's sequence number (`save`) before it sends, so a crash never reuses one;
+the helper sets the note's `sent` and `seq` itself. A phone gives its target over the authenticated
+session only (`POST /v2/push` on the control port, or a `push` message on the encrypted session),
+never through the app.
 
 `state.identity` contains private keys. Store it like a password; a lost identity means every phone
 pairs again. `pairing.qr2` and `invite2` hold the window's secrets like `qr`: show them, do not log

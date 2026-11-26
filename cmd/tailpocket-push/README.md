@@ -130,7 +130,7 @@ trust that address instead of `127.0.0.1`.
 | `apps[].apns` | | `team_id`, `key_id`, `key_file` (.p8), `topic` (bundle id), `env` (`production` or `sandbox`, default `production`) |
 | `apps[].fcm` | | `project_id`, `credentials_file` (service account JSON) |
 | `apps[].register_per_hour` | `1000` | Registrations and revokes per hour for this app, from all sources together |
-| `apps[].attest` | | `{"ios": {...}, "android": {...}}`: device attestation. **This build has no verifier, so setting it stops the start** (see below) |
+| `apps[].attest` | | `{"ios": {...}, "android": {...}}`: register and revoke need App Attest (APNs tokens) or Play Integrity (FCM tokens) evidence; see below |
 
 Each app needs `apns`, `fcm` or both. Unknown fields are an error.
 
@@ -142,13 +142,37 @@ Each app needs `apns`, `fcm` or both. Unknown fields are an error.
 3. Phones re-register on their normal schedule, at least every 30 days, because handles expire. After
    `handle_ttl_days`, remove the old key.
 
-### Attestation (not built in)
+### Attestation
 
-Without `attest`, an app runs in **strict mode**. The gateway checks token formats, limits registrations per address
-and per app, and blocks sources whose tokens Apple or Google reject. App Attest (iOS) and Play Integrity (Android)
-need the publisher's own setup and online calls to Apple and Google. The hook for them is the `attester` interface in
-`attest.go`, which documents what a verifier must check. No verifier ships, and the gateway refuses to start with
-`attest` set rather than run unchecked.
+Without `attest`, an app runs in **strict mode**: the gateway checks token formats, limits registrations per address
+and per app, and blocks sources whose tokens Apple or Google reject. With `attest`, register and revoke for that
+platform also need evidence that the request comes from the genuine app on a real device, bound to the app, platform,
+token, generation, operation and a one-time challenge from `POST /v1/challenge` (docs/PUSH.md §7):
+
+```json
+"attest": {
+  "ios": {"env": "production"},
+  "android": {"package_name": "io.jingtao.herdr",
+              "certificate_sha256": ["AB:CD:…:EF"],
+              "decryption_key_file": "herdr-pi-decryption.key",
+              "verification_key_file": "herdr-pi-verification.key"}
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `ios.team_id`, `ios.bundle_id` | `apns.team_id`, `apns.topic` | The App ID App Attest keys are made for |
+| `ios.env` | `production` | `development` for builds with the `development` App Attest environment entitlement (Xcode debug builds) |
+| `android.package_name` | required | The Android application id |
+| `android.certificate_sha256` | required | SHA-256 of the app signing key certificate Play delivers with (Play Console → Test and release → App integrity → App signing), hex with or without colons |
+| `android.decryption_key_file`, `android.verification_key_file` | none | The publisher's own Play Integrity response encryption keys (docs/PUSH.md §11, Google step 7), each one line of base64; the decryption key file must be mode 600. With them classic tokens are decoded here and Google is never called (recommended) |
+| `android.credentials_file` | `fcm.credentials_file` | Without local keys: a service account of the Google Cloud project linked to the app, for `decodeIntegrityToken` |
+| `android.decode_per_hour` | 400 | Without local keys: `decodeIntegrityToken` calls per hour for this app; over it, 503 `attestation_unavailable`. Keep 24 × this below the project's daily Play Integrity quota |
+
+App Attest is checked against Apple's App Attest root CA, built into the binary. The gateway keeps each attested key's
+public key and counter in `state_file`. `playintegrity.googleapis.com` is dialed only for apps with `attest.android` and no local keys. A source whose evidence
+fails 3 times in a row is blocked for 1 hour on register and revoke.
+Apple's receipt (fraud metric) is not checked.
 
 ## Limits
 
@@ -157,6 +181,7 @@ need the publisher's own setup and online calls to Apple and Google. The hook fo
 | All API requests per source address (IPv4, or IPv6 /64) | 600 per minute | 429 `rate_limited` |
 | `register` + `revoke` per source address | 20 per hour | 429 `rate_limited` |
 | `register` + `revoke` per app | `register_per_hour` | 429 `rate_limited` |
+| Challenges (`/v1/challenge`) | count toward the 600 per minute; each lasts 5 minutes and one request | 401 `bad_challenge` |
 | Sends per device (every handle of one token of one app) | 10 per minute, 300 per day | 429 `rate_limited` |
 | A source whose last 20 push results hold at least 10, more than half of them rejected tokens | blocked 1 hour, every endpoint, and the handles it registered | 429 `blocked` |
 | Request body | 8 KiB | 413 `too_large` |

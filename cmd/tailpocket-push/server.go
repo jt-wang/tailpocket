@@ -48,7 +48,7 @@ func (a *app) has(plat byte) bool {
 
 // loadApps reads the credentials of every app. The upstream addresses are
 // fixed here, from up, and nothing later changes them.
-func loadApps(c *config, up upstream, warn func(string, ...any)) (map[string]*app, error) {
+func loadApps(c *config, up upstream, gens *genStore, warn func(string, ...any)) (map[string]*app, error) {
 	m := map[string]*app{}
 	for _, ac := range c.Apps {
 		a := &app{
@@ -72,16 +72,17 @@ func loadApps(c *config, up upstream, warn func(string, ...any)) (map[string]*ap
 			a.apns = &apnsSender{base: base, topic: p.Topic, teamID: p.TeamID, keyID: p.KeyID, key: k}
 		}
 		if p := ac.FCM; p != nil {
-			sa, k, err := loadServiceAccount(p.CredentialsFile)
+			auth, err := newGoogleAuth(p.CredentialsFile, up.oauth, fcmScope)
 			if err != nil {
 				return nil, fmt.Errorf("app %s: fcm: %w", ac.ID, err)
 			}
 			if othersCanRead(p.CredentialsFile) {
 				warn("warning: %s is readable by other users; chmod 600 it", p.CredentialsFile)
 			}
-			a.fcm = &fcmSender{base: up.fcm, oauth: up.oauth, project: p.ProjectID, email: sa.ClientEmail, keyID: sa.PrivateKeyID, key: k}
+			a.fcm = &fcmSender{base: up.fcm, project: p.ProjectID, auth: auth}
 		}
 		if at := ac.Attest; at != nil {
+			env := attestEnv{app: &ac, dir: c.dir, up: up, state: gens}
 			for _, x := range []struct {
 				name string
 				plat byte
@@ -90,11 +91,7 @@ func loadApps(c *config, up upstream, warn func(string, ...any)) (map[string]*ap
 				if len(x.raw) == 0 {
 					continue
 				}
-				mk := attestVerifiers[x.name]
-				if mk == nil {
-					return nil, fmt.Errorf("app %s: attest.%s is set, but this build has no %s attestation verifier; remove attest to run in strict mode", ac.ID, x.name, x.name)
-				}
-				v, err := mk(x.raw)
+				v, err := attestVerifiers[x.name](x.raw, env)
 				if err != nil {
 					return nil, fmt.Errorf("app %s: attest.%s: %w", ac.ID, x.name, err)
 				}
@@ -122,6 +119,8 @@ type server struct {
 	devDay   *limiter
 	logLim   *limiter
 	bad      *badTokens
+	fails    *attestFails // sources whose attestation keeps failing
+	ch       *challenges
 	sending  chan struct{}
 }
 
@@ -143,6 +142,8 @@ func newServer(c *config, keys *handleKeys, gens *genStore, apps map[string]*app
 		devDay:   newLimiter(devPerDay, 24*time.Hour, 24, deviceKeys),
 		logLim:   newLimiter(10, time.Minute, 6, 1024),
 		bad:      newBadTokens(limiterKeys),
+		fails:    newAttestFails(limiterKeys),
+		ch:       newChallenges(keys.chKey),
 		sending:  make(chan struct{}, maxSending),
 	}
 }
@@ -160,6 +161,8 @@ func (s *server) sweepEvery(ctx context.Context, every time.Duration) {
 				l.sweep(now)
 			}
 			s.bad.sweep(now)
+			s.ch.sweep(now)
+			s.fails.sweep(now)
 			if err := s.gens.sweep(now); err != nil {
 				s.log.Printf("state-sweep-failed")
 			}
@@ -186,7 +189,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.Set("Content-Type", "text/plain; charset=utf-8")
 		io.WriteString(w, "ok\n")
-	case "/v1/register", "/v1/revoke", "/v1/send":
+	case "/v1/register", "/v1/revoke", "/v1/send", "/v1/challenge":
 		if r.Method != http.MethodPost {
 			h.Set("Allow", "POST")
 			s.refuse(w, http.StatusMethodNotAllowed, "method_not_allowed", nil)
@@ -261,9 +264,38 @@ func (s *server) api(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/v1/send":
 		s.send(w, r, b, src, now)
+	case "/v1/challenge":
+		s.challenge(w, b, now)
 	default:
 		s.device(w, r, b, addr, src, now)
 	}
+}
+
+// challenge answers POST /v1/challenge {app} with a one-time challenge for
+// attestation evidence, for an app that checks attestation.
+func (s *server) challenge(w http.ResponseWriter, body []byte, now time.Time) {
+	var q struct {
+		App string `json:"app"`
+	}
+	if err := decodeStrict(body, &q); err != nil {
+		s.refuse(w, http.StatusBadRequest, "bad_request", nil)
+		return
+	}
+	a := s.apps[q.App]
+	if a == nil {
+		s.refuse(w, http.StatusBadRequest, "unknown_app", nil)
+		return
+	}
+	if len(a.attest) == 0 {
+		s.refuse(w, http.StatusBadRequest, "attest_not_configured", logf{"app": a.id})
+		return
+	}
+	ch, exp, err := s.ch.issue(a.id, now)
+	if err != nil {
+		s.refuse(w, http.StatusInternalServerError, "internal", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"challenge": ch, "expires": exp})
 }
 
 type deviceReq struct {
@@ -288,7 +320,7 @@ func (s *server) device(w http.ResponseWriter, r *http.Request, body []byte, add
 		return
 	}
 	kv := logf{"app": a.id}
-	if !s.regIPLim.allow(addr, now) || !a.regLim.allow("", now) {
+	if !s.regIPLim.allow(addr, now) {
 		s.refuse(w, http.StatusTooManyRequests, "rate_limited", kv)
 		return
 	}
@@ -306,12 +338,66 @@ func (s *server) device(w http.ResponseWriter, r *http.Request, body []byte, add
 		s.refuse(w, http.StatusBadRequest, "bad_generation", kv)
 		return
 	}
-	if v := a.attest[plat]; v != nil {
-		ctx, cancel := context.WithTimeout(r.Context(), upstreamTimeout)
-		err := v.Verify(ctx, attestRequest{App: a.id, Platform: q.Platform, Op: op, Token: q.Token, Generation: q.Generation, Evidence: q.Attest})
+	// The app's own hourly budget: an attested platform pays only once its evidence passed, so
+	// requests without evidence cannot use up its real phones' registrations.
+	appLimited := func() bool {
+		if a.regLim.allow("", now) {
+			return false
+		}
+		s.refuse(w, http.StatusTooManyRequests, "rate_limited", kv)
+		return true
+	}
+	v := a.attest[plat]
+	if v == nil && appLimited() {
+		return
+	}
+	if v != nil {
+		// Attested apps: evidence bound to this request and to a one-time
+		// challenge, or nothing happens.
+		var ev struct {
+			Challenge string `json:"challenge"`
+		}
+		if len(q.Attest) == 0 || json.Unmarshal(q.Attest, &ev) != nil || ev.Challenge == "" {
+			s.refuse(w, http.StatusUnauthorized, "attestation_required", kv)
+			return
+		}
+		if !s.fails.enter(addr, now) {
+			s.refuse(w, http.StatusTooManyRequests, "blocked", kv)
+			return
+		}
+		if !s.ch.take(a.id, ev.Challenge, now) {
+			s.fails.release(addr)
+			s.refuse(w, http.StatusUnauthorized, "bad_challenge", kv)
+			return
+		}
+		// The check runs to its end even if the client hangs up: a decode it already paid for must
+		// count as a pass or a failure, not as the 503 a cancelled call would give (PG7).
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), upstreamTimeout)
+		err := v.Verify(ctx, attestRequest{App: a.id, Platform: q.Platform, Op: op, Token: q.Token, Generation: q.Generation,
+			Evidence: q.Attest, Now: now,
+			ClientDataHash: connectpush.AttestHash(op, a.id, q.Platform, q.Token, q.Generation, ev.Challenge)})
 		cancel()
 		if err != nil {
-			s.refuse(w, http.StatusUnauthorized, "attestation_failed", kv)
+			s.ch.give(ev.Challenge)
+			kv["reason"] = attestReason(err)
+			var ae *attestError
+			switch {
+			case isUnknownKey(err):
+				s.fails.release(addr)
+				s.refuse(w, http.StatusUnauthorized, "attest_key_unknown", kv)
+			case errors.As(err, &ae):
+				if s.fails.fail(addr, now) && s.logLim.allow("attest-blocked", now) {
+					s.log.Printf("source-blocked attest app=%s for=%s", a.id, attestFailBlock)
+				}
+				s.refuse(w, http.StatusUnauthorized, "attestation_failed", kv)
+			default:
+				s.fails.release(addr)
+				s.refuse(w, http.StatusServiceUnavailable, "attestation_unavailable", kv)
+			}
+			return
+		}
+		s.fails.pass(addr)
+		if appLimited() {
 			return
 		}
 	}

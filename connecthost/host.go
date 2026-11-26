@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"slices"
@@ -19,6 +20,7 @@ import (
 	"tailscale.com/types/key"
 
 	"github.com/jt-wang/tailpocket/connectinvite"
+	"github.com/jt-wang/tailpocket/connectpush"
 	"github.com/jt-wang/tailpocket/connectrelay"
 	"github.com/jt-wang/tailpocket/connectsecure"
 )
@@ -47,6 +49,9 @@ type State struct {
 	// Keys maps a paired phone ("nodekey:…") to its Noise public key (base64url), for the end-to-end
 	// encrypted routes. Phones paired before v0.3 have none until they next reach the host over Tailcat.
 	Keys map[string]string `json:"keys,omitempty"`
+	// Push maps a paired phone to the push target it gave (docs/PUSH.md) and the last note sequence
+	// number used for it. It holds the phone's push key: store it like Identity.
+	Push map[string]PushTarget `json:"push,omitempty"`
 }
 
 type Config struct {
@@ -94,6 +99,14 @@ type Config struct {
 	// Audit, when set, gets one Event per pairing, revoke, session and refusal. It never gets keys,
 	// codes or payloads.
 	Audit func(Event)
+	// PushGateways are the tailpocket-push gateways (https://push.example.com) phones may give push
+	// targets for. Empty turns push off: phones' targets are refused and Push has nothing to send to.
+	// A phone never chooses where the host connects: its gateway must be one of these.
+	PushGateways []string
+	// Push restores State.Push.
+	Push map[string]PushTarget
+	// PushClient makes the requests to the gateway; nil means a client with a 30-second timeout.
+	PushClient *http.Client
 }
 
 // Relay is one tailpocket-relay. Token is the relay's; the room comes from the host's relay key.
@@ -149,6 +162,10 @@ type Host struct {
 	sessions map[*connectsecure.Session]string // encrypted sessions -> phone
 	routeLns []routeListener                   // running relay and lan listeners
 	lan      *autoLAN                          // the automatic lan route, once started
+
+	push         map[key.NodePublic]PushTarget // phone -> its push target
+	pushGateways []string                      // normGateway of Config.PushGateways
+	pushClient   *http.Client
 }
 
 func New(cfg Config) (*Host, error) {
@@ -159,7 +176,8 @@ func New(cfg Config) (*Host, error) {
 		derpMapURL: cfg.DERPMapURL, start: realStart, listener: newChanListener(), pairings: map[*Pairing]struct{}{}, linger: map[*Pairing]struct{}{},
 		conns: map[*Conn]struct{}{}, controlPort: DefaultControlPort, control: newChanListener(), relays: cfg.Relays,
 		listen: cfg.Listen, authorize: cfg.Authorize, audit: cfg.Audit,
-		noise: map[key.NodePublic][32]byte{}, windows: map[string]*Pairing{}, sessions: map[*connectsecure.Session]string{}}
+		noise: map[key.NodePublic][32]byte{}, windows: map[string]*Pairing{}, sessions: map[*connectsecure.Session]string{},
+		push: map[key.NodePublic]PushTarget{}, pushClient: cfg.PushClient}
 	set, err := routeSet(cfg)
 	if err != nil {
 		return nil, err
@@ -211,6 +229,24 @@ func New(cfg Config) (*Host, error) {
 		}
 		if slices.Contains(h.allowed, k) {
 			h.noise[k] = nk
+		}
+	}
+	for _, g := range cfg.PushGateways {
+		n := normGateway(g)
+		if connectpush.ValidGateway(g) != nil || n == "" {
+			return nil, fmt.Errorf("connecthost: push gateway %q: use https:// (http:// only to a loopback address)", g)
+		}
+		h.pushGateways = append(h.pushGateways, n)
+	}
+	for phone, t := range cfg.Push {
+		k, err := parsePhone(phone)
+		c, cerr := h.checkTarget(t.Target)
+		if err != nil || cerr != nil {
+			continue // a gateway no longer configured, or a phone gone: the phone gives a new one
+		}
+		t.Target = c
+		if slices.Contains(h.allowed, k) {
+			h.push[k] = t
 		}
 	}
 	h.dirty = h.id.addSecure() && cfg.Identity != ""
@@ -279,7 +315,20 @@ func routeSet(cfg Config) (map[string]bool, error) {
 
 // stateLocked is what Save gets for identity id and phones allowed. h.mu must be held.
 func (h *Host) stateLocked(id identity, allowed []key.NodePublic, noise map[key.NodePublic][32]byte) State {
+	return h.stateWith(id, allowed, noise, h.push)
+}
+
+// stateWith is stateLocked with push targets push. h.mu must be held.
+func (h *Host) stateWith(id identity, allowed []key.NodePublic, noise map[key.NodePublic][32]byte, push map[key.NodePublic]PushTarget) State {
 	st := State{Identity: id.String(), Allowed: keyStrings(allowed)}
+	for _, k := range allowed {
+		if t, ok := push[k]; ok {
+			if st.Push == nil {
+				st.Push = map[string]PushTarget{}
+			}
+			st.Push[k.String()] = t
+		}
+	}
 	for _, k := range allowed {
 		if pub, ok := noise[k]; ok {
 			if st.Keys == nil {
@@ -460,6 +509,11 @@ func (h *Host) restartMain(ctx context.Context, keys []key.NodePublic) error {
 			delete(h.noise, k)
 		}
 	}
+	for k := range h.push {
+		if gone[k.String()] {
+			delete(h.push, k)
+		}
+	}
 	h.reindexLocked()
 	dropped := h.takeConnsLocked(gone)
 	sessions := h.takeSessionsLocked(gone)
@@ -630,6 +684,7 @@ func (h *Host) Revoke(ctx context.Context, phone string) error {
 	h.mu.Lock()
 	h.allowed, h.dirty = keep, false
 	delete(h.noise, k)
+	delete(h.push, k)
 	h.reindexLocked()
 	gone := map[string]bool{k.String(): true}
 	dropped := h.takeConnsLocked(gone)

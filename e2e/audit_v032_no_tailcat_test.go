@@ -59,16 +59,10 @@ func TestNoTailcatAuditMobileLayer(t *testing.T) {
 	defer cancel()
 
 	st := &store{}
-	h, err := connecthost.New(connecthost.Config{Name: "audit", Save: st.save,
-		Routes: []string{connectinvite.RouteLAN, connectinvite.RouteRelay}, Listen: []string{freeLoopback(t)},
-		Relays: []connecthost.Relay{{URL: localRelay(t), Token: "e2e-relay-token"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := startOnFreeLoopback(t, ctx, connecthost.Config{Name: "audit", Save: st.save,
+		Routes: []string{connectinvite.RouteLAN, connectinvite.RouteRelay}, Listen: []string{"picked"},
+		Relays: []connecthost.Relay{{URL: localRelay(t), Token: "e2e-relay-token"}}}, freeLoopback)
 	defer h.Close()
-	if err := h.Start(ctx); err != nil {
-		t.Fatal(err)
-	}
 	serveEcho(h)
 
 	if out := connectmobile.SetRoutes("lan,relay"); out != "" {

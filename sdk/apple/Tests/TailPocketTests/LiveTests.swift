@@ -32,8 +32,39 @@ final class LiveTests: XCTestCase {
         web.standardOutput = FileHandle.nullDevice
         web.standardError = FileHandle.nullDevice
         try web.run()
-        Thread.sleep(forTimeInterval: 1)
-        return port
+        // Wait until it serves the file: python3 can be slow to start on a cold CI runner, and until then
+        // the computer's forward is refused and the phone sees the connection dropped (lastFailure none).
+        // One deadline on the monotonic clock bounds the whole wait, each request included.
+        let hello = URL(string: "http://127.0.0.1:\(port)/hello.txt")!
+        let deadline = ProcessInfo.processInfo.systemUptime + 30
+        while web.isRunning {
+            let left = deadline - ProcessInfo.processInfo.systemUptime
+            if left <= 0 { break }
+            if Self.serves(hello, body: "hello from the computer\n", within: min(left, 2)) { return port }
+            Thread.sleep(forTimeInterval: min(0.1, max(0, deadline - ProcessInfo.processInfo.systemUptime)))
+        }
+        throw TailPocketError(code: web.isRunning ? "test web server did not serve hello.txt in 30 s" : "test web server exited")
+    }
+
+    /// True when one GET answers 200 with exactly `body` within `seconds`, all of it.
+    static func serves(_ url: URL, body: String, within seconds: TimeInterval) -> Bool {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = seconds
+        config.timeoutIntervalForResource = seconds
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let done = DispatchSemaphore(value: 0)
+        var ok = false
+        let task = session.dataTask(with: url) { data, response, _ in
+            ok = (response as? HTTPURLResponse)?.statusCode == 200 && data.map { String(decoding: $0, as: UTF8.self) } == body
+            done.signal()
+        }
+        task.resume()
+        if done.wait(timeout: .now() + seconds) == .timedOut {
+            task.cancel()
+            return false
+        }
+        return ok
     }
 
     func fetchHello(_ link: TailPocketHostLink) async throws -> String {
@@ -48,6 +79,9 @@ final class LiveTests: XCTestCase {
                 return String(decoding: data, as: UTF8.self)
             } catch { lastError = error }
         }
+        // The forward only drops the connection; lastFailure says why (code, reason, route; no secret).
+        let why = (try? connection.lastFailure()).flatMap { $0 }.map { "\($0.code) \($0.reason) \($0.route) \($0.routes)" }
+        XCTFail("no answer over the tunnel; lastFailure: \(why ?? "none")")
         throw lastError!
     }
 
@@ -93,7 +127,8 @@ final class LiveTests: XCTestCase {
             request.timeoutInterval = 20
             if let (data, _) = try? await URLSession.shared.data(for: request) { body = String(decoding: data, as: UTF8.self) }
         }
-        XCTAssertEqual(body, "hello from the computer\n")
+        let why = body.isEmpty ? try? await bridge.call("tailPocket.lastFailure", ["handle": opened?["handle"] as Any]) : nil
+        XCTAssertEqual(body, "hello from the computer\n", "lastFailure: \(why.map { "\($0)" } ?? "none")")
         _ = try await bridge.call("tailPocket.disconnect", ["handle": opened?["handle"] as Any])
     }
 
@@ -144,8 +179,10 @@ final class LiveTests: XCTestCase {
         XCTAssertEqual(shown, helper.requestEmoji)
         XCTAssertEqual(paired.payload, "relay-token")
         XCTAssertNotNil(paired.hostKey)
+        // Only the relay route: with the computer's lan route too, the session moves to the local network
+        // (v0.3.1), and this part checks the relay.
         let overRelay = TailPocketHostLink(address: "", port: 0, name: paired.name, payload: paired.payload, key: paired.key,
-                                           hostKey: paired.hostKey, via: paired.via)
+                                           hostKey: paired.hostKey, via: paired.via?.filter { $0.t == "relay" })
         let c1 = try TailPocket.connect(overRelay)
         let body1 = try await fetch(c1)
         XCTAssertEqual(body1, "hello from the computer\n")

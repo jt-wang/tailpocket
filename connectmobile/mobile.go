@@ -485,7 +485,8 @@ func LastFailure(handle int64) string {
 	return string(body)
 }
 
-// Stop closes a Connect handle. Unknown or repeated handles are ignored.
+// Stop closes a Connect handle. Unknown or repeated handles are ignored. The forward closes first, so
+// the app's open connections end at once and no new dial starts on the session being closed.
 func Stop(handle int64) {
 	connMu.Lock()
 	c := conns[handle]
@@ -493,8 +494,11 @@ func Stop(handle int64) {
 	connMu.Unlock()
 	if c != nil {
 		c.forward.Close()
-		_ = c.session.Close()
+		_ = closeSession(c.session)
 	}
 }
+
+// closeSession is Session.Close; a test replaces it to look at the forward while Stop is between the two.
+var closeSession = (*connectphone.Session).Close
 
 func itoa(i int) string { return strconv.Itoa(i) }

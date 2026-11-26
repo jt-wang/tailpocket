@@ -40,7 +40,7 @@ import (
 )
 
 // Version is the library version the phone sends in its encrypted hello.
-const Version = "0.3.6"
+const Version = "0.4.0"
 
 // ErrRevoked: the host said, encrypted, that this phone is no longer paired. Pair again.
 var ErrRevoked = errors.New("connectphone: the host no longer has this phone paired")
@@ -119,6 +119,9 @@ type Session struct {
 	secKey  string
 	drained []*connectsecure.Session // replaced sessions still carrying connections (Drain)
 	revoked bool
+
+	acks    map[float64]chan map[string]any // push messages waiting for the host's push-ack
+	ackNext float64
 	closed  bool
 	upTry   time.Time    // when Dial last looked for a better route (upgrade)
 	failure *DialFailure // the last Dial that failed, nil after one succeeds
@@ -601,6 +604,8 @@ func (s *Session) watch(sess *connectsecure.Session) {
 			}
 			_ = sess.Close()
 			return
+		case "push-ack":
+			s.deliverAck(m)
 		}
 	}
 }
@@ -775,6 +780,18 @@ func routeOf(res *ipnstate.PingResult, err error, address string) (Route, error)
 	return r, nil
 }
 
+// controlHTTP speaks HTTP to the host's control port over Tailcat.
+func controlHTTP(client *tailcat.Client) *http.Client {
+	return &http.Client{Transport: &http.Transport{DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			c, err := client.DialTCPPort(ctx, connectinvite.ControlPort)
+			if err != nil {
+				return nil, err // never a nil *gonet.TCPConn inside a net.Conn (see dialRoute)
+			}
+			return c, nil
+		}}}
+}
+
 // Sync registers the phone's Noise key with the host over Tailcat and takes the host's key and
 // routes. A phone paired before v0.3 calls it once to use the encrypted routes without a new QR; it
 // is also how a phone learns routes the host added. A host older than v0.3 does not answer.
@@ -793,14 +810,7 @@ func (s *Session) Sync(ctx context.Context) (Link, error) {
 		}
 		return Link{}, errors.New("connectphone: this link has no Tailcat route")
 	}
-	httpClient := &http.Client{Transport: &http.Transport{DisableKeepAlives: true,
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			c, err := client.DialTCPPort(ctx, connectinvite.ControlPort)
-			if err != nil {
-				return nil, err
-			}
-			return c, nil
-		}}}
+	httpClient := controlHTTP(client)
 	type syncReply struct {
 		V   int                   `json:"v"`
 		PK  string                `json:"pk"`

@@ -55,11 +55,22 @@ type Client struct {
 	HTTP *http.Client
 }
 
-type deviceReq struct {
+// Device names one device token of one app for Register and Revoke.
+type Device struct {
 	App        string `json:"app"`
-	Platform   string `json:"platform"`
+	Platform   string `json:"platform"` // "apns" or "fcm"
 	Token      string `json:"token"`
 	Generation uint64 `json:"generation"`
+	// Attest is the attestation evidence, for a gateway that checks it for
+	// this app (docs/PUSH.md §7): {"challenge":…, …} bound to the other
+	// fields by AttestClientData. Leave it nil otherwise.
+	Attest json.RawMessage `json:"attest,omitempty"`
+}
+
+// Registration is the gateway's answer to Register.
+type Registration struct {
+	Handle  string `json:"handle"`
+	Expires int64  `json:"expires"` // unix seconds; register again before then
 }
 
 // Register asks the gateway for a handle for a device token of app
@@ -68,23 +79,47 @@ type deviceReq struct {
 // one stop working. The gateway answers 409 (an *Error with Code
 // "stale_generation") for a generation below one it has seen.
 func (c *Client) Register(ctx context.Context, app, platform, token string, generation uint64) (handle string, err error) {
-	var out struct {
-		Handle string `json:"handle"`
-	}
-	if err := c.post(ctx, "/v1/register", deviceReq{app, platform, token, generation}, &out); err != nil {
-		return "", err
+	r, err := c.RegisterDevice(ctx, Device{App: app, Platform: platform, Token: token, Generation: generation})
+	return r.Handle, err
+}
+
+// RegisterDevice is Register with attestation evidence and the expiry.
+func (c *Client) RegisterDevice(ctx context.Context, d Device) (Registration, error) {
+	var out Registration
+	if err := c.post(ctx, "/v1/register", d, &out); err != nil {
+		return Registration{}, err
 	}
 	if out.Handle == "" {
-		return "", errors.New("connectpush: gateway answered without a handle")
+		return Registration{}, errors.New("connectpush: gateway answered without a handle")
 	}
-	return out.Handle, nil
+	return out, nil
 }
 
 // Revoke makes every handle for the token with a generation up to and
 // including generation stop working. Register again with generation+1 or
 // more for a new handle.
 func (c *Client) Revoke(ctx context.Context, app, platform, token string, generation uint64) error {
-	return c.post(ctx, "/v1/revoke", deviceReq{app, platform, token, generation}, nil)
+	return c.RevokeDevice(ctx, Device{App: app, Platform: platform, Token: token, Generation: generation})
+}
+
+// RevokeDevice is Revoke with attestation evidence.
+func (c *Client) RevokeDevice(ctx context.Context, d Device) error {
+	return c.post(ctx, "/v1/revoke", d, nil)
+}
+
+// Challenge asks the gateway for a one-time challenge for app's
+// attestation evidence. It is valid for a few minutes and one request.
+func (c *Client) Challenge(ctx context.Context, app string) (string, error) {
+	var out struct {
+		Challenge string `json:"challenge"`
+	}
+	if err := c.post(ctx, "/v1/challenge", map[string]string{"app": app}, &out); err != nil {
+		return "", err
+	}
+	if out.Challenge == "" || len(out.Challenge) > 256 || !IsBase64URL(out.Challenge) {
+		return "", errors.New("connectpush: gateway answered without a challenge")
+	}
+	return out.Challenge, nil
 }
 
 // Send passes the sealed note ct to the device behind handle. The gateway

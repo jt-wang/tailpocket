@@ -93,3 +93,119 @@ func (b *badTokens) sweepLocked(now time.Time) {
 		}
 	}
 }
+
+// attestFails blocks a source (an IPv4 address or an IPv6 /64) whose attestation evidence failed
+// attestFailLimit times in a row, for attestFailBlock, on register and revoke. A success clears
+// its count. A source's requests still at the verifier count with its failures, so one that sends
+// in parallel gets no more past enter than one that waits for each answer: made-up Play Integrity
+// tokens cost at most attestFailLimit decodes per source an hour. Answers that say nothing about
+// the evidence (503 unavailable, unknown key, bad challenge) count nothing.
+type attestFails struct {
+	max int
+
+	mu sync.Mutex
+	m  map[string]*failRun
+}
+
+const (
+	attestFailLimit = 3
+	attestFailBlock = time.Hour
+)
+
+type failRun struct {
+	n        int // failures in a row
+	inflight int // requests past enter, not yet answered
+	last     time.Time
+	until    time.Time
+}
+
+func newAttestFails(maxKeys int) *attestFails {
+	return &attestFails{max: maxKeys, m: map[string]*failRun{}}
+}
+
+// enter reports whether a request from addr may go to the verifier: addr is not blocked, and its
+// failures plus its requests in flight are below attestFailLimit. A request that entered must end
+// with exactly one of fail, pass or release. When the table is full of other sources it lets the
+// request through untracked (fail, pass and release then do nothing for it).
+func (f *attestFails) enter(addr string, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.m[addr]
+	if r == nil {
+		if len(f.m) >= f.max {
+			f.sweepLocked(now)
+			if len(f.m) >= f.max {
+				return true
+			}
+		}
+		r = &failRun{}
+		f.m[addr] = r
+	}
+	if now.Before(r.until) || r.n+r.inflight >= attestFailLimit {
+		return false
+	}
+	r.inflight++
+	r.last = now
+	return true
+}
+
+func (f *attestFails) leaveLocked(r *failRun) {
+	if r.inflight > 0 {
+		r.inflight--
+	}
+}
+
+// fail ends a request whose evidence failed, and reports whether it just blocked addr.
+func (f *attestFails) fail(addr string, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.m[addr]
+	if r == nil {
+		return false
+	}
+	f.leaveLocked(r)
+	r.last = now
+	if now.Before(r.until) {
+		return false
+	}
+	r.n++
+	if r.n >= attestFailLimit {
+		r.n, r.until = 0, now.Add(attestFailBlock)
+		return true
+	}
+	return false
+}
+
+// pass ends a request whose evidence passed, and clears addr's run of failures.
+func (f *attestFails) pass(addr string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r := f.m[addr]; r != nil {
+		f.leaveLocked(r)
+		r.n = 0
+	}
+}
+
+// release ends a request that said nothing about the evidence.
+func (f *attestFails) release(addr string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r := f.m[addr]; r != nil {
+		f.leaveLocked(r)
+	}
+}
+
+func (f *attestFails) sweep(now time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sweepLocked(now)
+}
+
+// sweepLocked forgets sources neither blocked, in flight, nor seen in attestFailBlock.
+func (f *attestFails) sweepLocked(now time.Time) {
+	for k, r := range f.m {
+		if r.inflight == 0 && !now.Before(r.until) && now.Sub(r.last) >= attestFailBlock {
+			delete(f.m, k)
+		}
+	}
+}

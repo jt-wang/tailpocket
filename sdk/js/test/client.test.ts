@@ -151,13 +151,32 @@ test("the names it calls are the bridge's names", async () => {
   const tailPocket = createTailPocket(t);
   await tailPocket.newKey(); await tailPocket.publicKey("k"); await tailPocket.inviteText("t"); await tailPocket.decodeInvite("t"); await tailPocket.pair("t", { device: "d" });
   await tailPocket.decodeInvite2("t"); await tailPocket.setTailcatOnly(false); await tailPocket.setRoutes(null);
-  const conn = await tailPocket.connect(); await conn.sync(); await conn.path(); await conn.link(); await conn.lastFailure(); await conn.close();
+  const conn = await tailPocket.connect(); await conn.sync(); await conn.path(); await conn.link(); await conn.lastFailure();
+  await conn.givePush({ gateway: "g", app: "a", pushHandle: "h" }); await conn.clearPush(); await conn.close();
+  await tailPocket.push.register({ gateway: "g", app: "a", token: "t" }); await tailPocket.push.revoke({ gateway: "g", app: "a", token: "t" }); await tailPocket.push.forget("k");
   await (await tailPocket.nearby("s", () => {}))(); const p = await tailPocket.pairNearby({ name: "n" }); await p.finish(); await p.cancel();
   await tailPocket.scan(); await tailPocket.store.phoneKey(); await tailPocket.store.saveLink(link); await tailPocket.store.link(); await tailPocket.store.deleteLink();
   const { readFileSync } = await import("node:fs");
   const kotlin = readFileSync(new URL("../../android/tailpocket/src/main/java/io/jingtao/tailpocket/Bridge.kt", import.meta.url), "utf8");
   const bridge = [...kotlin.matchAll(/"(tailPocket\.[a-zA-Z0-9.]+)"/g)].map((m) => m[1]).filter((n) => n !== "tailPocket.nearby" && n !== "tailPocket.pair.emoji"); // events
   assert.deepEqual([...names].sort(), [...new Set(bridge)].sort());
+});
+
+test("push calls carry the connection handle and never a key", async () => {
+  const f = fake({ "tailPocket.connect": { handle: 7, port: 1, baseUrl: "" }, "tailPocket.push.register": { handle: "H", expires: 9 },
+    "tailPocket.push.give": { kid: "K" }, "tailPocket.push.clear": null });
+  const tailPocket = createTailPocket(f.transport);
+  const reg = await tailPocket.push.register({ gateway: "https://push.example.com", app: "io.jingtao.herdr", token: "T", platform: "apns" });
+  const conn = await tailPocket.connect();
+  assert.deepEqual(await conn.givePush({ gateway: "https://push.example.com", app: "io.jingtao.herdr", pushHandle: reg.handle }), { kid: "K" });
+  await conn.clearPush("K");
+  assert.deepEqual(f.calls.slice(1).map((c) => [c.name, c.args]), [
+    ["tailPocket.connect", {}],
+    ["tailPocket.push.give", { handle: 7, gateway: "https://push.example.com", app: "io.jingtao.herdr", pushHandle: "H" }],
+    ["tailPocket.push.clear", { handle: 7, kid: "K" }],
+  ]);
+  assert.equal(f.calls[0].name, "tailPocket.push.register");
+  assert.ok(f.calls[0].timeoutMs! > 60_000, "register can take a challenge and an attestation first");
 });
 
 test("lastFailure: handshake-closed, no-answer, then null once a connection worked (v0.3.4)", async () => {

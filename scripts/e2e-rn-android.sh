@@ -1,6 +1,6 @@
 #!/bin/sh
 # End to end for React Native on Android: the example app (examples/rn-phone, a release build with
-# the JavaScript bundled in) opens a pairing deep link on this project's own emulator (AVD tailpocket_e2e,
+# the JavaScript bundled in) opens a pairing deep link on an emulator (AVD $TAILPOCKET_AVD, default boop-35,
 # never another one), pairs with the Node example host over Tailcat and shows the computer's
 # /hello.txt. Needs scripts/build-host.sh, scripts/build-mobile.sh android, ./gradlew publish in
 # sdk/android, and npm install in examples/rn-phone first.
@@ -10,6 +10,7 @@ cd "$(dirname "$0")/.."
 : "${ANDROID_HOME:=$HOME/Library/Android/sdk}"
 export JAVA_HOME ANDROID_HOME
 adb="$ANDROID_HOME/platform-tools/adb"
+AVD="${TAILPOCKET_AVD:-boop-35}" # the emulator this script starts when none runs on PORT
 PORT="${TAILPOCKET_EMULATOR_PORT:-5600}"
 export ANDROID_SERIAL="emulator-$PORT"
 APP=io.jingtao.tailpocket.rnphone
@@ -20,8 +21,19 @@ trap cleanup EXIT
 
 # An emulator that is still shutting down (an earlier run's) shows as offline: wait for it to go.
 while "$adb" devices | grep -q "^$ANDROID_SERIAL[[:space:]]offline"; do sleep 1; done
-if ! "$adb" devices | grep -q "^$ANDROID_SERIAL[[:space:]]device"; then
-  "$ANDROID_HOME/emulator/emulator" -avd tailpocket_e2e -port "$PORT" -no-window -no-audio -no-boot-anim -no-snapshot-save >/dev/null 2>&1 &
+if "$adb" devices | grep -q "^$ANDROID_SERIAL[[:space:]]device"; then
+  # Reuse a running emulator only if it is $AVD: another one on this port may be someone else's.
+  running=$("$adb" -s "$ANDROID_SERIAL" emu avd name 2>/dev/null | head -1 | tr -d '\r')
+  if [ "$running" != "$AVD" ]; then
+    echo "$(basename "$0"): $ANDROID_SERIAL runs AVD '${running:-unknown}', not $AVD; set TAILPOCKET_AVD or TAILPOCKET_EMULATOR_PORT" >&2
+    exit 1
+  fi
+else
+  if ! "$ANDROID_HOME/emulator/emulator" -list-avds | grep -Fxq -- "$AVD"; then
+    echo "$(basename "$0"): no Android AVD named $AVD; set TAILPOCKET_AVD to one of: $("$ANDROID_HOME/emulator/emulator" -list-avds | tr '\n' ' ')" >&2
+    exit 1
+  fi
+  "$ANDROID_HOME/emulator/emulator" -avd "$AVD" -port "$PORT" -no-window -no-audio -no-boot-anim -no-snapshot-save >/dev/null 2>&1 &
   emu=$!
   "$adb" -s "$ANDROID_SERIAL" wait-for-device
   until [ "$("$adb" -s "$ANDROID_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do sleep 2; done
@@ -36,7 +48,7 @@ TAILPOCKET_STATE=$(mktemp) TAILPOCKET_NAME="rn android host" node examples/node-
 pid=$!
 for _ in $(seq 1 60); do grep -q '^QR ' "$log" && break; sleep 1; done
 qr=$(sed -n 's/^QR //p' "$log")
-[ -n "$qr" ] || { echo "host did not print an invite"; cat "$log"; exit 1; }
+[ -n "$qr" ] || { echo "the host printed no invite; its log, invite lines removed:"; { grep -v -E '^(QR|QR2) ' "$log" || true; }; exit 1; }
 
 # The invite is base64url after "tailpocket1:", so it needs no escaping in the link.
 "$adb" shell am start -W -a android.intent.action.VIEW -d "tailpocketdemo://pair?invite=$qr" "$APP" >/dev/null
@@ -54,7 +66,7 @@ done
 if ! echo "$screen" | grep -q 'hello from the computer'; then
   echo "FAIL: the app did not show the computer's answer"
   echo "$screen" | grep -o 'text="[^"]*"' | grep -v 'text=""'
-  echo "host:"; cat "$log"
+  echo "host log, invite lines removed:"; { grep -v -E '^(QR|QR2) ' "$log" || true; }
   "$adb" logcat -d -s ReactNativeJS:V AndroidRuntime:E | tail -30
   exit 1
 fi

@@ -74,6 +74,7 @@ export class TailPocketHost extends EventEmitter {
       keys: options.keys, relays: options.relays, listen: options.listen, tailcatOnly: !!options.tailcatOnly, noLan: !!options.noLan,
       routes: options.routes,
       authorize: typeof options.authorize === 'function', audit: typeof options.audit === 'function',
+      pushGateways: options.pushGateways, push: options.push,
     });
   }
 
@@ -114,7 +115,8 @@ export class TailPocketHost extends EventEmitter {
         try { this.options.audit?.({ kind: e.kind, phone: e.phone, route: e.route, reason: e.reason, time: new Date(e.time) }); } catch {}
         break;
       }
-      case 'status': this.#settle(e.id, null, { address: e.address, routes: e.routes, relays: e.relays }); break;
+      case 'status': this.#settle(e.id, null, { address: e.address, routes: e.routes, relays: e.relays, push: e.push ?? [] }); break;
+      case 'pushed': this.#settle(e.id, null); break;
       case 'disconnected': this.#settle(e.id, null); break;
       case 'pairing': this.#settle(e.id, null, e); break;
       case 'paired': {
@@ -223,6 +225,20 @@ export class TailPocketHost extends EventEmitter {
 
   /** Close one phone's connections and keep it paired, e.g. when its sign-in ran out. */
   async disconnect(phone) { await this.#request({ cmd: 'disconnect', phone }); }
+
+  /**
+   * Push a note to a phone that gave this computer its push target (options.pushGateways). The note is
+   * sealed for that phone; the gateway and Apple or Google see only ciphertext. Rejects with code
+   * push-no-target, push-gone (the phone's handle stopped working; it gives a new one), push-too-large
+   * (shorten body), push-rate-limited or push-failed.
+   * @param {string} phone
+   * @param {import('./index.d.ts').TailPocketPushNote} note
+   * @param {{collapse?: string, priority?: 'high' | 'normal'}} [options]
+   */
+  async push(phone, note, options = {}) {
+    await this.#request({ cmd: 'push', phone, note: { title: note?.title, body: note?.body, thread: note?.thread, url: note?.url, kind: note?.kind },
+      collapse: options.collapse, priority: options.priority });
+  }
 
   /** The address, the routes phones use, and each relay: "up" or why not. */
   async status() { return this.#request({ cmd: 'status' }); }

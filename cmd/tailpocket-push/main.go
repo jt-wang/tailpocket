@@ -86,7 +86,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return fail("%v", err)
 	}
 	up := defaultUpstream()
-	apps, err := loadApps(cfg, up, warn)
+	apps, err := loadApps(cfg, up, gens, warn)
 	if err != nil {
 		return fail("%v", err)
 	}

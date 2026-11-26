@@ -26,7 +26,16 @@ interface TailPocketNative {
     fun path(handle: Long, timeoutMs: Long): String
     // v0.3.4: why the handle's last connection attempt failed, {"code","reason","route","routes","at"} or {}.
     fun lastFailure(handle: Long): String
+    // Push (connectmobile/push.go). The defaults keep other implementations of this interface compiling.
+    fun pushNewKey(): String = UNSUPPORTED
+    fun pushChallenge(gateway: String, app: String, timeoutMs: Long): String = UNSUPPORTED
+    fun pushRegister(gateway: String, app: String, platform: String, token: String, generation: Long, attest: String, timeoutMs: Long): String = UNSUPPORTED
+    fun pushRevoke(gateway: String, app: String, platform: String, token: String, generation: Long, attest: String, timeoutMs: Long): String = UNSUPPORTED
+    fun pushGive(handle: Long, target: String, timeoutMs: Long): String = UNSUPPORTED
+    fun pushClear(handle: Long, timeoutMs: Long): String = UNSUPPORTED
 }
+
+private const val UNSUPPORTED = """{"error":"unsupported"}"""
 
 internal object GoNative : TailPocketNative {
     override fun newKey(): String = Connectmobile.newKey()
@@ -49,4 +58,12 @@ internal object GoNative : TailPocketNative {
     override fun link(handle: Long): String = Connectmobile.link(handle)
     override fun path(handle: Long, timeoutMs: Long): String = Connectmobile.path(handle, timeoutMs)
     override fun lastFailure(handle: Long): String = Connectmobile.lastFailure(handle)
+    override fun pushNewKey(): String = Connectmobile.pushNewKey()
+    override fun pushChallenge(gateway: String, app: String, timeoutMs: Long): String = Connectmobile.pushChallenge(gateway, app, timeoutMs)
+    override fun pushRegister(gateway: String, app: String, platform: String, token: String, generation: Long, attest: String, timeoutMs: Long): String =
+        Connectmobile.pushRegister(gateway, app, platform, token, generation, attest, timeoutMs)
+    override fun pushRevoke(gateway: String, app: String, platform: String, token: String, generation: Long, attest: String, timeoutMs: Long): String =
+        Connectmobile.pushRevoke(gateway, app, platform, token, generation, attest, timeoutMs)
+    override fun pushGive(handle: Long, target: String, timeoutMs: Long): String = Connectmobile.pushGive(handle, target, timeoutMs)
+    override fun pushClear(handle: Long, timeoutMs: Long): String = Connectmobile.pushClear(handle, timeoutMs)
 }

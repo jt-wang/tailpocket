@@ -1,5 +1,5 @@
 #!/bin/sh
-# End to end on an Android emulator of this project's own (AVD tailpocket_e2e, never another one):
+# End to end on an Android emulator (AVD $TAILPOCKET_AVD, default boop-35):
 #   1. QR path: the Node example host prints an invite; the instrumented test pairs and fetches.
 #   1b. The same through TailPocketBridge, the function table NSH and React Native forward to.
 #   2. Same-Wi-Fi path: a second host advertises over Bonjour and auto-approves; the script finds its
@@ -11,6 +11,7 @@ cd "$(dirname "$0")/.."
 : "${ANDROID_HOME:=$HOME/Library/Android/sdk}"
 export JAVA_HOME ANDROID_HOME
 adb="$ANDROID_HOME/platform-tools/adb"
+AVD="${TAILPOCKET_AVD:-boop-35}" # the emulator this script starts when none runs on PORT
 PORT="${TAILPOCKET_EMULATOR_PORT:-5600}"
 export ANDROID_SERIAL="emulator-$PORT" # gradle installs only on this device
 
@@ -20,8 +21,19 @@ trap cleanup EXIT
 
 # An emulator that is still shutting down (an earlier run's) shows as offline: wait for it to go.
 while "$adb" devices | grep -q "^$ANDROID_SERIAL[[:space:]]offline"; do sleep 1; done
-if ! "$adb" devices | grep -q "^$ANDROID_SERIAL[[:space:]]device"; then
-  "$ANDROID_HOME/emulator/emulator" -avd tailpocket_e2e -port "$PORT" -no-window -no-audio -no-boot-anim -no-snapshot-save >/dev/null 2>&1 &
+if "$adb" devices | grep -q "^$ANDROID_SERIAL[[:space:]]device"; then
+  # Reuse a running emulator only if it is $AVD: another one on this port may be someone else's.
+  running=$("$adb" -s "$ANDROID_SERIAL" emu avd name 2>/dev/null | head -1 | tr -d '\r')
+  if [ "$running" != "$AVD" ]; then
+    echo "$(basename "$0"): $ANDROID_SERIAL runs AVD '${running:-unknown}', not $AVD; set TAILPOCKET_AVD or TAILPOCKET_EMULATOR_PORT" >&2
+    exit 1
+  fi
+else
+  if ! "$ANDROID_HOME/emulator/emulator" -list-avds | grep -Fxq -- "$AVD"; then
+    echo "$(basename "$0"): no Android AVD named $AVD; set TAILPOCKET_AVD to one of: $("$ANDROID_HOME/emulator/emulator" -list-avds | tr '\n' ' ')" >&2
+    exit 1
+  fi
+  "$ANDROID_HOME/emulator/emulator" -avd "$AVD" -port "$PORT" -no-window -no-audio -no-boot-anim -no-snapshot-save >/dev/null 2>&1 &
   emu=$!
   "$adb" -s "$ANDROID_SERIAL" wait-for-device
   until [ "$("$adb" -s "$ANDROID_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do sleep 2; done
@@ -32,7 +44,7 @@ start_host() { # $1 log, rest: env
   env "$@" TAILPOCKET_STATE="$(mktemp)" node examples/node-host/server.mjs >"$log" 2>&1 &
   pids="$pids $!"
   for _ in $(seq 1 60); do grep -q '^QR ' "$log" && return 0; sleep 1; done
-  cat "$log"; return 1
+  echo "$*: printed no invite; its log, invite lines removed:"; { grep -v -E '^(QR|QR2) ' "$log" || true; }; return 1
 }
 
 qrlog=$(mktemp); start_host "$qrlog" TAILPOCKET_NAME="e2e qr host"

@@ -167,6 +167,20 @@ test('pre.4 config: tailcatOnly, noLan, and appAuth with an opaque relay', async
   await opaque.host.close();
 });
 
+test('push goes to phones with a target and reports why not', async () => {
+  const phone = 'nodekey:' + 'ab'.repeat(32);
+  const target = { gateway: 'https://push.example.com', app: 'io.x', handle: 'H', kid: 'k', key: 'K', seq: 3 };
+  const { host } = await start({ allowed: [phone], pushGateways: ['https://push.example.com'], push: { [phone]: target } });
+  assert.deepEqual((await host.status()).push, [phone]);
+  await host.push(phone, { title: 'Build', body: 'done' }, { collapse: 'b1' });
+  await assert.rejects(host.push('nodekey:' + 'cd'.repeat(32), { body: 'x' }), (e) => e.code === 'push-no-target');
+  await assert.rejects(host.push(phone, { body: 'x'.repeat(3000) }), (e) => e.code === 'push-too-large');
+  await host.close();
+  const off = await start({ allowed: [phone], push: { [phone]: target } });
+  await assert.rejects(off.host.push(phone, { body: 'x' }), (e) => e.code === 'push-no-target');
+  await off.host.close();
+});
+
 test('v0.3.2 routes: a set without Tailcat, and bad sets rejected with the reason', async () => {
   const relayOnly = await start({ routes: ['relay'], relays: [{ url: 'wss://relay.example.com', token: 't' }] });
   assert.deepEqual((await relayOnly.host.status()).routes.map((r) => r.t), ['relay']);

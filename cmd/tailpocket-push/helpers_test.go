@@ -267,6 +267,7 @@ func (g *gw) upstream() upstream {
 		apnsSandbox:    g.up.ts.URL + "/sandbox",
 		fcm:            g.up.ts.URL,
 		oauth:          g.up.ts.URL + "/token",
+		playIntegrity:  g.up.ts.URL + "/pi",
 	}
 }
 
@@ -288,7 +289,7 @@ func (g *gw) build(cfgJSON string) *server {
 		g.t.Fatal(err)
 	}
 	up := g.upstream()
-	apps, err := loadApps(cfg, up, warn)
+	apps, err := loadApps(cfg, up, gens, warn)
 	if err != nil {
 		g.t.Fatal(err)
 	}

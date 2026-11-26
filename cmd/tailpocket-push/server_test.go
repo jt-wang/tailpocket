@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rsa"
@@ -719,43 +718,3 @@ func mustB64(t *testing.T, s string) []byte {
 	}
 	return b
 }
-
-func TestAttestationHook(t *testing.T) {
-	g := newGateway(t)
-	withAttest := strings.Replace(baseConfig, `"id": "io.example.alpha",`, `"id": "io.example.alpha", "attest": {"ios": {"team": "x"}},`, 1)
-	cfg, err := parseConfig([]byte(withAttest), g.dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadApps(cfg, g.upstream(), func(string, ...any) {}); err == nil || !strings.Contains(err.Error(), "no ios attestation verifier") {
-		t.Fatalf("attest with no verifier: %v", err)
-	}
-
-	// With a verifier plugged in, register and revoke go through it.
-	var seen []attestRequest
-	attestVerifiers["ios"] = func(c json.RawMessage) (attester, error) {
-		return attestFunc(func(r attestRequest) error {
-			seen = append(seen, r)
-			if string(r.Evidence) != `"good"` {
-				return fmt.Errorf("no")
-			}
-			return nil
-		}), nil
-	}
-	defer delete(attestVerifiers, "ios")
-	g.srv = g.build(withAttest)
-	dev := map[string]any{"app": appA, "platform": "apns", "token": apnsToken(1), "generation": 1}
-	wantCode(t, g.post("/v1/register", ipX, dev), http.StatusUnauthorized, "attestation_failed")
-	dev["attest"] = "good"
-	wantCode(t, g.post("/v1/register", ipX, dev), http.StatusOK, "")
-	wantCode(t, g.post("/v1/revoke", ipX, dev), http.StatusNoContent, "")
-	if len(seen) != 3 || seen[2].Op != "revoke" || seen[1].Token != apnsToken(1) || seen[1].Generation != 1 {
-		t.Fatalf("verifier saw %+v", seen)
-	}
-	// FCM on the same app has no verifier configured: strict mode.
-	g.register(appA, "fcm", fcmToken(1), 1, ipX)
-}
-
-type attestFunc func(attestRequest) error
-
-func (f attestFunc) Verify(_ context.Context, r attestRequest) error { return f(r) }

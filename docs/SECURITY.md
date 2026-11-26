@@ -226,11 +226,13 @@ See [PUSH.md](PUSH.md); the gateway (`cmd/tailpocket-push`) is code only, not de
   `/v1/revoke` (it raises the token's lowest valid generation, kept on disk; a corrupt state file
   stops the gateway rather than reviving revoked handles), and does so when a computer is removed, so
   that computer cannot push again.
-- **Not yet: device attestation for `/v1/register` and `/v1/revoke` (G1).** They are rate limited
-  (per source address, per app and per device) and a source that sends many invalid tokens is
-  blocked, but App Attest and Play Integrity are not implemented: someone who learns a device token
-  can register it, and push the app's fixed placeholder text to it. Implement them before the
-  gateway is deployed; a config that asks for them refuses to start until then.
+- **Device attestation for `/v1/register` and `/v1/revoke` (G1), per app in config.** With
+  `attest`, App Attest (chain to Apple's root, nonce, rpId, aaguid, strictly increasing counter) or
+  Play Integrity (request hash, package, signing certificate, `PLAY_RECOGNIZED`,
+  `MEETS_DEVICE_INTEGRITY`, timestamp) must pass, bound to the operation, app, token, generation and
+  a one-time challenge. Without it the app is in strict mode: rate limits per source address, per app
+  and per device, and blocking sources that send many invalid tokens; there, someone who learns a
+  device token can register it and push the app's fixed placeholder text to it.
 - **Nothing else is sent (G2).** Visible title and body come only from the gateway's config;
   `collapse` must match `[A-Za-z0-9._-]{1,64}` and `priority` is `high` or `normal`. The gateway
   connects only to APNs, FCM and Google OAuth, follows no redirect and uses no proxy; CONNECT,

@@ -17,7 +17,7 @@ host=$!
 trap 'kill $host 2>/dev/null; rm -f "$log"' EXIT
 for _ in $(seq 1 60); do grep -q '^QR ' "$log" && break; sleep 1; done
 qr=$(sed -n 's/^QR //p' "$log")
-[ -n "$qr" ] || { echo "host did not print an invite"; cat "$log"; exit 1; }
+[ -n "$qr" ] || { echo "the host printed no invite; its log, invite lines removed:"; { grep -v -E '^(QR|QR2) ' "$log" || true; }; exit 1; }
 cd sdk/apple/NSH
 TEST_RUNNER_TAILPOCKET_NSH_INVITE="$qr" TEST_RUNNER_TAILPOCKET_NSH_BUNDLE="$PWD/../../../build/nsh-phone/bundle.js" \
   xcodebuild test -scheme TailPocketNSH -destination "id=$udid" -quiet

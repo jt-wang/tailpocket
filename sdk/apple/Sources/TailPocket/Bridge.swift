@@ -34,12 +34,14 @@ public final class TailPocketBridge: @unchecked Sendable {
         "tailPocket.nearby.start", "tailPocket.nearby.stop", "tailPocket.local.begin", "tailPocket.local.finish", "tailPocket.local.cancel", "tailPocket.scan",
         "tailPocket.store.phoneKey", "tailPocket.store.saveLink", "tailPocket.store.link", "tailPocket.store.deleteLink",
         "tailPocket.setTailcatOnly", "tailPocket.setRoutes",
+        "tailPocket.push.register", "tailPocket.push.give", "tailPocket.push.revoke", "tailPocket.push.clear", "tailPocket.push.forget",
     ]
 
     private let store: any TailPocketLinkStore
     private let nearbyFor: @Sendable (String) -> any TailPocketNearbySource
     private let scanner: (@Sendable ([String]) async throws -> String)?
     private let emit: @Sendable (String, Any?) -> Void
+    private let push: TailPocketPushPhone?
     private let lock = NSLock()
     private var nearby: (any TailPocketNearbySource)?
     private var connections: [Int64: (connection: TailPocketConnection, slot: String?)] = [:]
@@ -49,13 +51,17 @@ public final class TailPocketBridge: @unchecked Sendable {
     /// - Parameters:
     ///   - scanner: shows a QR scanner and returns the first invite text with one of the prefixes; nil makes
     ///     "tailPocket.scan" fail with "unsupported".
+    ///   - push: register, give and revoke push handles, with keys in the Keychain group the Notification Service
+    ///     Extension reads (docs/PUSH.md); nil makes the "tailPocket.push.*" names fail with "unsupported".
     public init(store: any TailPocketLinkStore = TailPocketKeychainStore(),
                 nearby: @escaping @Sendable (String) -> any TailPocketNearbySource = { TailPocketNearbyHostsSource(service: $0) },
                 scanner: (@Sendable ([String]) async throws -> String)? = nil,
+                push: TailPocketPushPhone? = nil,
                 emit: @escaping @Sendable (String, Any?) -> Void) {
         self.store = store
         self.nearbyFor = nearby
         self.scanner = scanner
+        self.push = push
         self.emit = emit
     }
 
@@ -216,6 +222,37 @@ public final class TailPocketBridge: @unchecked Sendable {
             try store.deleteLink(slot: Self.dict(a)["slot"] as? String ?? "default")
             return nil
         },
+        // Push (docs/PUSH.md §1). Push keys stay in the Keychain; JavaScript sees only key ids.
+        "tailPocket.push.register": { [unowned self] a in
+            let args = Self.dict(a)
+            let reg = try await pushPhone().register(gateway: try Self.string(a, "gateway"), app: try Self.string(a, "app"), token: try Self.string(a, "token"),
+                                                     platform: args["platform"] as? String ?? "apns", timeout: Self.seconds(args, 30))
+            return try Self.value(reg)
+        },
+        "tailPocket.push.give": { [unowned self] a in
+            let args = Self.dict(a)
+            let reg = TailPocketPushRegistration(handle: try Self.string(a, "pushHandle"), expires: (args["expires"] as? NSNumber)?.int64Value ?? 0)
+            let kid = try await pushPhone().give(try connection(args).connection, gateway: try Self.string(a, "gateway"), app: try Self.string(a, "app"),
+                                                 registration: reg, timeout: Self.seconds(args, 30))
+            return ["kid": kid]
+        },
+        "tailPocket.push.revoke": { [unowned self] a in
+            let args = Self.dict(a)
+            let reg = try await pushPhone().revoke(gateway: try Self.string(a, "gateway"), app: try Self.string(a, "app"), token: try Self.string(a, "token"),
+                                                   kid: args["kid"] as? String, platform: args["platform"] as? String ?? "apns", timeout: Self.seconds(args, 30))
+            return try Self.value(reg)
+        },
+        "tailPocket.push.clear": { [unowned self] a in
+            let args = Self.dict(a)
+            let phone = try pushPhone()
+            try await connection(args).connection.clearPush(timeout: Self.seconds(args, 30))
+            if let kid = args["kid"] as? String { try phone.forget(kid: kid) }
+            return nil
+        },
+        "tailPocket.push.forget": { [unowned self] a in
+            try pushPhone().forget(kid: try Self.string(a, "kid"))
+            return nil
+        },
     ]
 
     public func call(_ name: String, _ args: Any?) async throws -> Any? {
@@ -234,6 +271,11 @@ public final class TailPocketBridge: @unchecked Sendable {
         waiting.forEach { $0.cancel() }
     }
 
+    private func pushPhone() throws -> TailPocketPushPhone {
+        guard let push else { throw TailPocketError(code: "unsupported") }
+        return push
+    }
+
     private func next() -> Int64 { lock.withLock { serial += 1; return serial } }
 
     private func connection(_ args: [String: Any]) throws -> (connection: TailPocketConnection, slot: String?) {
@@ -248,6 +290,9 @@ public final class TailPocketBridge: @unchecked Sendable {
     static func string(_ a: Any?, _ key: String) throws -> String {
         guard let s = dict(a)[key] as? String else { throw TailPocketError(code: "invalid-arguments") }
         return s
+    }
+    static func seconds(_ args: [String: Any], _ fallback: TimeInterval) -> TimeInterval {
+        (args["timeoutMs"] as? NSNumber).map { $0.doubleValue / 1000 } ?? fallback
     }
     static func prefix(_ a: Any?) -> String { dict(a)["prefix"] as? String ?? TailPocket.defaultPrefix }
     /// The prefixes "tailPocket.scan" looks for: `prefix` and `prefix2` as given, or both defaults when neither is.

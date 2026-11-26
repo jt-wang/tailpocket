@@ -50,7 +50,7 @@ var resolveLine = regexp.MustCompile(`can be reached at (\S+):(\d+) \(interface 
 var addrLine = regexp.MustCompile(`^\s*\S+\s+Add\s+\S+\s+(\d+)\s+\S+\s+(\d+\.\d+\.\d+\.\d+)\s`)
 
 func browseDNSSD(ctx context.Context, typ string) (<-chan Entry, error) {
-	cmd := exec.CommandContext(ctx, darwinDNSSD, "-B", typ, "local")
+	cmd := exec.CommandContext(ctx, hooksOf(ctx).tool, "-B", typ, "local")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -95,12 +95,43 @@ func browseDNSSD(ctx context.Context, typ string) (<-chan Entry, error) {
 	return out, nil
 }
 
+// resolveSummary is what resolveDNSSD saw for one instance, without names, TXT or addresses.
+type resolveSummary struct {
+	Port        bool   // -L gave a host and port
+	Interface   string // the interface -L resolved it on
+	Loopback    int    // -G v4 loopback addresses (not used)
+	Other       int    // -G v4 other addresses
+	OnInterface int    // of Other, on the interface -L resolved it on
+}
+
+// dnssdHooks lets a test, through the context of one Browse, run a fixture for dns-sd and see each
+// resolveDNSSD result. Without them (normal use) Browse runs /usr/bin/dns-sd and reports nothing.
+type dnssdHooks struct {
+	tool  string
+	trace func(instance string, s resolveSummary)
+}
+
+type dnssdHooksKey struct{}
+
+func hooksOf(ctx context.Context) dnssdHooks {
+	h, _ := ctx.Value(dnssdHooksKey{}).(dnssdHooks)
+	if h.tool == "" {
+		h.tool = darwinDNSSD
+	}
+	return h
+}
+
 // resolveDNSSD runs dns-sd -L for host, port and TXT, then dns-sd -G v4 for the addresses.
-func resolveDNSSD(ctx context.Context, instance, typ string) (Entry, bool) {
+func resolveDNSSD(ctx context.Context, instance, typ string) (e Entry, ok bool) {
+	var sum resolveSummary
+	hooks := hooksOf(ctx)
+	if hooks.trace != nil {
+		defer func() { hooks.trace(instance, sum) }()
+	}
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	lines, wait := run(rctx, darwinDNSSD, "-L", instance, typ, "local")
-	e := Entry{Instance: instance, Type: typ, TXT: map[string]string{}}
+	lines, wait := run(rctx, hooks.tool, "-L", instance, typ, "local")
+	e = Entry{Instance: instance, Type: typ, TXT: map[string]string{}}
 	ifindex := ""
 	for line := range lines {
 		if m := resolveLine.FindStringSubmatch(line); m != nil {
@@ -118,9 +149,10 @@ func resolveDNSSD(ctx context.Context, instance, typ string) (Entry, bool) {
 	if e.Port == 0 {
 		return Entry{}, false
 	}
+	sum.Port, sum.Interface = true, ifindex
 	actx, acancel := context.WithTimeout(ctx, 2*time.Second)
 	defer acancel()
-	lines, wait = run(actx, darwinDNSSD, "-G", "v4", e.Host)
+	lines, wait = run(actx, hooks.tool, "-G", "v4", e.Host)
 	var first, rest []net.IP
 	for line := range lines {
 		m := addrLine.FindStringSubmatch(line)
@@ -128,10 +160,15 @@ func resolveDNSSD(ctx context.Context, instance, typ string) (Entry, bool) {
 			continue
 		}
 		ip := net.ParseIP(m[2]).To4()
+		if ip != nil && ip.IsLoopback() {
+			sum.Loopback++
+		}
 		if ip == nil || ip.IsLoopback() || containsIP(first, ip) || containsIP(rest, ip) {
 			continue
 		}
+		sum.Other++
 		if m[1] == ifindex {
+			sum.OnInterface++
 			first = append(first, ip)
 			acancel() // the resolving interface answered; that is the address to use
 		} else {

@@ -14,6 +14,7 @@ package e2e
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -82,8 +83,10 @@ func TestLiveRelayOnly(t *testing.T) {
 	}
 	conn, r := held(t, ctx, s, phonePub)
 	defer conn.Close()
-	// With UDP blocked the route is DERP, named by its region.
-	if rt, err := s.Route(ctx); err != nil || rt.Kind != connectphone.KindDERP && rt.Kind != connectphone.KindDirect ||
+	// With UDP blocked the route is DERP, named by its region. TAILPOCKET_EXPECT_DERP=1 (set while
+	// scripts/e2e-udp-block.sh is on) accepts nothing else: a direct route then means UDP got through.
+	derpOnly := os.Getenv("TAILPOCKET_EXPECT_DERP") == "1"
+	if rt, err := s.Route(ctx); err != nil || rt.Kind != connectphone.KindDERP && (derpOnly || rt.Kind != connectphone.KindDirect) ||
 		rt.Kind == connectphone.KindDERP && (rt.DERPRegion == 0 || rt.DERPCode == "" && rt.DERPHost == "") {
 		t.Errorf("route %+v %v", rt, err)
 	} else {

@@ -63,11 +63,19 @@ export interface TailPocketConnection {
   path(timeoutMs?: number): Promise<TailPocketPath>;
   /** The link with the computer's latest routes. */
   link(): Promise<TailPocketHostLink>;
+  /** Makes a push key for this computer (kept natively, never in JavaScript), and gives it with the push handle from
+   *  `push.register` over the authenticated session. Resolves to the key id: keep it with the computer's slot.
+   *  `push-refused` (the computer's `reason`), `push-unsupported`. */
+  givePush(options: { gateway: string; app: string; pushHandle: string; timeoutMs?: number }): Promise<{ kid: string }>;
+  /** Tells the computer to forget this phone's push target, and deletes the key `kid` if given. */
+  clearPush(kid?: string, timeoutMs?: number): Promise<void>;
   /** Why the last connection attempt failed, or `null` when none failed since the last one that worked (v0.3.4). The
    *  forward only closes a connection whose attempt failed, so `fetch` sees a network error; read this then. */
   lastFailure(): Promise<TailPocketDialFailure | null>;
   close(): Promise<void>;
 }
+/** A push handle from the gateway (docs/PUSH.md); register again before `expires` (unix seconds). */
+export interface TailPocketPushRegistration { handle: string; expires: number }
 export interface TailPocketNearbyHost { name: string }
 export interface TailPocketPendingPairing {
   /** Show this; the computer's owner checks it matches before approving. */
@@ -160,6 +168,10 @@ export function createTailPocket(transport: TailPocketTransport) {
         sync: (timeoutMs?: number) => call<TailPocketHostLink>("tailPocket.sync", timeoutMs ? { handle, timeoutMs } : { handle }, (timeoutMs ?? 30_000) + SLACK_MS),
         path: (timeoutMs?: number) => call<TailPocketPath>("tailPocket.path", timeoutMs ? { handle, timeoutMs } : { handle }, (timeoutMs ?? 5_000) + SLACK_MS),
         link: () => call<TailPocketHostLink>("tailPocket.link", { handle }),
+        givePush: (o: { gateway: string; app: string; pushHandle: string; timeoutMs?: number }) =>
+          call<{ kid: string }>("tailPocket.push.give", { handle, ...o }, (o.timeoutMs ?? 30_000) + SLACK_MS),
+        clearPush: (kid?: string, timeoutMs?: number) =>
+          call<void>("tailPocket.push.clear", { handle, ...(kid ? { kid } : {}), ...(timeoutMs ? { timeoutMs } : {}) }, (timeoutMs ?? 30_000) + SLACK_MS),
         lastFailure: async () => (await call<TailPocketDialFailure | null>("tailPocket.lastFailure", { handle })) ?? null,
         close: () => call<void>("tailPocket.disconnect", { handle }),
       };
@@ -190,6 +202,21 @@ export function createTailPocket(transport: TailPocketTransport) {
           call<TailPocketInvite>("tailPocket.local.finish", timeoutMs ? { op, timeoutMs } : { op }, (timeoutMs ?? LOCAL_TIMEOUT_MS) + SLACK_MS),
         cancel: () => call<void>("tailPocket.local.cancel", { op }),
       };
+    },
+
+    /** Push (docs/PUSH.md §1). The device token comes from the app (APNs as hex, or FCM); the native side keeps the
+     *  generation and push keys, and attests when the bridge was made with an attester. Errors: stale-generation,
+     *  attestation-required, attestation-failed, attest-key-unknown, rate-limited, unreachable, timeout, unsupported. */
+    push: {
+      /** Registers the device token with the gateway; give the handle to each computer with `connection.givePush`. */
+      register: (o: { gateway: string; app: string; token: string; platform?: "apns" | "fcm"; timeoutMs?: number }) =>
+        call<TailPocketPushRegistration>("tailPocket.push.register", o, 2 * (o.timeoutMs ?? 30_000) + SLACK_MS),
+      /** After removing a computer: makes every handle given so far stop working, deletes `kid`'s key, and registers at the
+       *  next generation. Give the new handle to the computers that stay. */
+      revoke: (o: { gateway: string; app: string; token: string; kid?: string; platform?: "apns" | "fcm"; timeoutMs?: number }) =>
+        call<TailPocketPushRegistration>("tailPocket.push.revoke", o, 4 * (o.timeoutMs ?? 30_000) + SLACK_MS),
+      /** Deletes a computer's push key, for a computer that is gone. */
+      forget: (kid: string) => call<void>("tailPocket.push.forget", { kid }),
     },
 
     /** The native store (Keychain / Android Keystore): the phone key and saved computers by slot. */

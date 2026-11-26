@@ -6,6 +6,27 @@ export interface TailPocketHostState {
   allowed: string[];
   /** Each phone's Noise key for the end-to-end encrypted routes (v0.3). Pass it back as options.keys. */
   keys?: Record<string, string>;
+  /** Each phone's push target and its last note number (contains the phone's push key). Pass it back as options.push. */
+  push?: Record<string, TailPocketPushTarget>;
+}
+
+/** What a phone gave this computer to push to it (docs/PUSH.md). `key` is a secret. */
+export interface TailPocketPushTarget {
+  gateway: string;
+  app: string;
+  handle: string;
+  kid: string;
+  key: string;
+  seq: number;
+}
+
+/** A push note: what the phone shows once it has opened it. At most about 2 KB of JSON in all. */
+export interface TailPocketPushNote {
+  title?: string;
+  body?: string;
+  thread?: string;
+  url?: string;
+  kind?: string;
 }
 
 /** A tailpocket-relay the host registers with. */
@@ -59,6 +80,10 @@ export interface TailPocketHostOptions {
   noLan?: boolean;
   /** Tailcat only, as before v0.3: no local network listener, no relay; invites and routes list only Tailcat. Not with `relays` or `listen`. */
   tailcatOnly?: boolean;
+  /** tailpocket-push gateways (https://…) phones may give push targets for. Empty: push is off. */
+  pushGateways?: string[];
+  /** Restore state.push. */
+  push?: Record<string, TailPocketPushTarget>;
   /**
    * Exactly the routes to run (v0.3.2), one or more of "tailcat", "lan", "relay". Without "tailcat" the helper starts
    * no Tailcat node and talks to no Tailcat or DERP server; only emoji windows (`pair({ emoji: true })`) exist then.
@@ -164,6 +189,9 @@ export class TailPocketHost extends EventEmitter {
   setAllowed(phones: string[]): Promise<void>;
   revoke(phone: string): Promise<void>;
   disconnect(phone: string): Promise<void>;
-  status(): Promise<{ address: string; routes: TailPocketRoute[]; relays: Record<string, string> }>;
+  /** `push`: the phones that gave this computer a push target. */
+  status(): Promise<{ address: string; routes: TailPocketRoute[]; relays: Record<string, string>; push: string[] }>;
+  /** Seal `note` for `phone` and send it through its push gateway. */
+  push(phone: string, note: TailPocketPushNote, options?: { collapse?: string; priority?: 'high' | 'normal' }): Promise<void>;
   close(): Promise<void>;
 }

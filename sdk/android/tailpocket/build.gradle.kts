@@ -23,6 +23,8 @@ dependencies {
     api(libs.tailpocket.mobile)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
+    // Only TailPocketPlayIntegrity uses it; an app that does adds the dependency itself.
+    compileOnly(libs.play.integrity)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.test.runner)
@@ -31,14 +33,14 @@ dependencies {
     androidTestImplementation(libs.kotlinx.coroutines.test)
 }
 
-// ./gradlew publish puts io.jingtao.tailpocket:tailpocket:0.3.6 next to the gomobile library in
+// ./gradlew publish puts io.jingtao.tailpocket:tailpocket:0.4.0 next to the gomobile library in
 // build/android/m2 (React Native's module and any app can depend on it from there).
 publishing {
     publications {
         register<MavenPublication>("release") {
             groupId = "io.jingtao.tailpocket"
             artifactId = "tailpocket"
-            version = "0.3.6"
+            version = "0.4.0"
             afterEvaluate { from(components["release"]) }
         }
     }

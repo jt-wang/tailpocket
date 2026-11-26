@@ -9,8 +9,11 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
@@ -124,7 +127,25 @@ data class TailPocketHostLink(
  * unreachable, revoked, mismatch, handshake-closed, denied, local-failed, cancelled, timeout, unknown-handle, failed.
  * Only "revoked" means the computer removed this phone: delete its link.
  */
-class TailPocketException(val code: String) : Exception(code)
+class TailPocketException(
+    val code: String,
+    /** With "stale-generation": the lowest generation the gateway takes for this device. */
+    val minGeneration: Long? = null,
+    /** With "push-refused": the computer's reason (push-off, gateway-not-allowed, invalid, failed). */
+    val reason: String? = null,
+) : Exception(code)
+
+/** A push handle from the gateway; register again before [expires] (unix seconds). */
+@Serializable
+data class TailPocketPushRegistration(val handle: String, val expires: Long)
+
+/** What a phone gives a computer so it can push to it (docs/PUSH.md §1). [key] is 32 bytes base64url. */
+@Serializable
+data class TailPocketPushTarget(val gateway: String, val app: String, val handle: String, val kid: String, val key: String)
+
+/** A new push key for one computer: [key] is 32 bytes base64url. */
+@Serializable
+data class TailPocketPushKey(val kid: String, val key: String)
 
 /**
  * A local route to the computer: point OkHttp, HttpURLConnection or a WebSocket client at [baseUrl].
@@ -155,6 +176,19 @@ class TailPocketConnection internal constructor(
     /** Registers this phone's end-to-end key over Tailcat and returns the updated link to store. Links paired before v0.3 need it once; no new QR. */
     suspend fun sync(timeoutMs: Long = 30_000): TailPocketHostLink =
         withContext(Dispatchers.IO) { decode(TailPocketHostLink.serializer(), native.sync(handle, timeoutMs)) }
+
+    /**
+     * Gives the computer this phone's push target over the authenticated session (never an opaque relay).
+     * Refusals throw "push-refused" with [TailPocketException.reason], or "push-unsupported" for a computer without push.
+     */
+    suspend fun givePush(target: TailPocketPushTarget, timeoutMs: Long = 30_000) {
+        withContext(Dispatchers.IO) { decode(JsonObject.serializer(), native.pushGive(handle, json.encodeToString(TailPocketPushTarget.serializer(), target), timeoutMs)) }
+    }
+
+    /** Tells the computer to forget this phone's push target. */
+    suspend fun clearPush(timeoutMs: Long = 30_000) {
+        withContext(Dispatchers.IO) { decode(JsonObject.serializer(), native.pushClear(handle, timeoutMs)) }
+    }
 
     /** How the connection reaches the computer now. Throws "revoked" once the computer removed this phone. */
     suspend fun path(timeoutMs: Long = 5_000): TailPocketPath =
@@ -187,12 +221,13 @@ internal val json = Json { ignoreUnknownKeys = true; encodeDefaults = false; exp
 private val ops = AtomicLong()
 private val callers = Executors.newCachedThreadPool { r -> Thread(r, "tailpocket").apply { isDaemon = true } }
 
-private fun failure(text: String): String? = try {
-    json.parseToJsonElement(text).jsonObject["error"]?.jsonPrimitive?.content
+private fun failure(text: String): TailPocketException? = try {
+    val o = json.parseToJsonElement(text).jsonObject
+    o["error"]?.jsonPrimitive?.content?.let { TailPocketException(it, o["minGeneration"]?.jsonPrimitive?.longOrNull, o["reason"]?.jsonPrimitive?.contentOrNull) }
 } catch (_: Exception) { null }
 
 internal fun <T> decode(serializer: kotlinx.serialization.KSerializer<T>, text: String): T {
-    failure(text)?.let { throw TailPocketException(it) }
+    failure(text)?.let { throw it }
     return try { json.decodeFromString(serializer, text) } catch (_: Exception) { throw TailPocketException("failed") }
 }
 
@@ -264,13 +299,13 @@ class TailPocket private constructor(private val native: TailPocketNative) {
      */
     fun setRoutes(routes: List<String>?) {
         if (routes != null && (routes.isEmpty() || routes.any { it.isEmpty() || it.contains(',') })) throw TailPocketException("invalid-routes")
-        failure(native.setRoutes(routes?.joinToString(",") ?: ""))?.let { throw TailPocketException(it) }
+        failure(native.setRoutes(routes?.joinToString(",") ?: ""))?.let { throw it }
     }
 
     /** Opens a local route to the computer. Nothing goes over the network until a client connects. */
     fun connect(link: TailPocketHostLink, derpMapUrl: String = ""): TailPocketConnection {
         val out = native.connect(link.encode(), derpMapUrl)
-        failure(out)?.let { throw TailPocketException(it) }
+        failure(out)?.let { throw it }
         val obj = json.parseToJsonElement(out).jsonObject
         return TailPocketConnection(native, obj.getValue("handle").jsonPrimitive.content.toLong(), obj.getValue("port").jsonPrimitive.content.toInt(),
             obj.getValue("token").jsonPrimitive.content, obj.getValue("base").jsonPrimitive.content)
@@ -280,9 +315,33 @@ class TailPocket private constructor(private val native: TailPocketNative) {
     suspend fun beginLocalPairing(address: String, device: String, label: String = ""): TailPocketPendingLocalPairing {
         val op = ops.incrementAndGet()
         val out = blocking(native, op) { native.localPairStart(op, address, label, device) }
-        failure(out)?.let { throw TailPocketException(it) }
+        failure(out)?.let { throw it }
         val code = json.parseToJsonElement(out).jsonObject.getValue("code").jsonPrimitive.content
         return TailPocketPendingLocalPairing(native, op, code)
+    }
+
+    /** A new push key and key id for one computer ([TailPocketPushPhone.give] makes and stores one for you). */
+    fun pushNewKey(): TailPocketPushKey = decode(TailPocketPushKey.serializer(), native.pushNewKey())
+
+    /** A challenge for attestation evidence from [gateway], for [app]. */
+    suspend fun pushChallenge(gateway: String, app: String, timeoutMs: Long = 30_000): String = withContext(Dispatchers.IO) {
+        decode(JsonObject.serializer(), native.pushChallenge(gateway, app, timeoutMs))["challenge"]?.jsonPrimitive?.content ?: throw TailPocketException("failed")
+    }
+
+    /**
+     * Registers a device token ("fcm", or "apns" as hex) with [gateway] for [app] at [generation] (from 1, kept by the
+     * phone), with attestation [attest] JSON for a gateway that checks it. Errors: stale-generation (with
+     * [TailPocketException.minGeneration]), attestation-required, attestation-failed, attest-key-unknown, rate-limited,
+     * invalid-arguments, unreachable, timeout, failed.
+     */
+    suspend fun pushRegister(gateway: String, app: String, platform: String, token: String, generation: Long, attest: String? = null,
+                             timeoutMs: Long = 30_000): TailPocketPushRegistration = withContext(Dispatchers.IO) {
+        decode(TailPocketPushRegistration.serializer(), native.pushRegister(gateway, app, platform, token, generation, attest ?: "", timeoutMs))
+    }
+
+    /** Makes every handle for the token with a generation up to [generation] stop working; then register at generation + 1. */
+    suspend fun pushRevoke(gateway: String, app: String, platform: String, token: String, generation: Long, attest: String? = null, timeoutMs: Long = 30_000) {
+        withContext(Dispatchers.IO) { decode(JsonObject.serializer(), native.pushRevoke(gateway, app, platform, token, generation, attest ?: "", timeoutMs)) }
     }
 
     companion object {
